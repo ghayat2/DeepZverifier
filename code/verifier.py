@@ -23,8 +23,8 @@ def analyze(net, inputs, eps, true_label):
             mean = np.array(layer.mean).reshape(-1)[0]
             sigma = np.array(layer.sigma).reshape(-1)[0]
 
-            sdt = np.diag(np.ones(shape=len(inputs))*(1/sigma))
-            mean = np.ones(shape=len(inputs))*(-mean/sigma)
+            sdt = np.diag(np.ones(shape=len(inputs)) * (1 / sigma))
+            mean = np.ones(shape=len(inputs)) * (-mean / sigma)
             zonotope = affine_fully_connected(zonotope, sdt, mean)
 
         if isinstance(layer, torch.nn.Linear):
@@ -53,14 +53,14 @@ def relu_fully_connected(zonotope):
     for i in range(len(zonotope)):
         if l[i] >= 0:
             result.append(zonotope[i])
-        if u[i] <= 0:
+        elif u[i] <= 0:
             result.append(np.zeros(shape=np.shape(zonotope[1])))
         else:
             slope = u[i] / (u[i] - l[i])
             temp = zonotope[i]
             temp *= slope
-            temp[0] -= (slope + l[i]) / 2
-            result.append(np.append(np.concatenate([temp, np.zeros(shape=added)]), -(slope + l[i]) / 2))
+            temp[0] -= (slope * l[i]) / 2
+            result.append(np.append(np.concatenate([temp, np.zeros(shape=added)]), -(slope * l[i]) / 2))
             added += 1
 
     target_size = np.shape(zonotope)[1] + added
@@ -73,7 +73,7 @@ def relu_fully_connected(zonotope):
 
 def compute_upper_lower_bounds(zonotope):
     (l, u) = (zonotope[:, 0], zonotope[:, 0])
-    max = np.array(functools.reduce(lambda x, y: abs(x) + abs(y), zonotope.T))
+    max = np.array(np.sum(np.abs(zonotope[:, 1:]), axis=1))
     (l, u) = (l - max, l + max)
     return l, u
 
