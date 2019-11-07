@@ -1,15 +1,90 @@
 import argparse
 import torch
-from networks import FullyConnected, Conv
+from networks import FullyConnected, Conv, Normalization
+import numpy as np
+import functools
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
 
 
 def analyze(net, inputs, eps, true_label):
-    print(net)
 
-    return 0
+    inputs = inputs.reshape(-1)
+    noise = np.ones(shape=(len(inputs))) * eps
+    noise = np.diag(noise)
+    zonotope = np.concatenate((inputs.reshape(1, -1), noise), axis=0).T
+
+    for i in range(len(net.layers)):
+
+        layer = net.layers[i]
+
+        if isinstance(layer, Normalization):
+            mean = np.array(layer.mean).reshape(-1)[0]
+            sigma = np.array(layer.sigma).reshape(-1)[0]
+
+            sdt = np.diag(np.ones(shape=len(inputs)) * (1 / sigma))
+            mean = np.ones(shape=len(inputs)) * (-mean / sigma)
+            zonotope = affine_fully_connected(zonotope, sdt, mean)
+
+        if isinstance(layer, torch.nn.Linear):
+            weight_matrix = list(net.parameters())[i - 2].data.numpy()
+            bias = list(net.parameters())[i - 1].data.numpy()
+            zonotope = affine_fully_connected(zonotope, weight_matrix, bias)
+
+        if isinstance(layer, torch.nn.ReLU):
+            zonotope = relu_fully_connected(zonotope)
+
+    result = verify(zonotope, true_label)
+    return result
+
+
+def affine_fully_connected(zonotope, weight_matrix, bias):
+    result = np.matmul(weight_matrix, zonotope)
+    result[:, 0] = result[:, 0] + bias
+    return result
+
+
+def relu_fully_connected(zonotope):
+    (l, u) = compute_upper_lower_bounds(zonotope)
+    result = []
+    added = 0
+
+    for i in range(len(zonotope)):
+        if l[i] >= 0:
+            result.append(zonotope[i])
+        elif u[i] <= 0:
+            result.append(np.zeros(shape=np.shape(zonotope[1])))
+        else:
+            slope = u[i] / (u[i] - l[i])
+            temp = zonotope[i]
+            temp *= slope
+            temp[0] -= (slope * l[i]) / 2
+            result.append(np.append(np.concatenate([temp, np.zeros(shape=added)]), -(slope * l[i]) / 2))
+            added += 1
+
+    target_size = np.shape(zonotope)[1] + added
+    for i in range(len(result)):
+        result[i] = np.concatenate([result[i], np.zeros(shape=(target_size - len(result[i])))])
+
+    result = np.array(result).reshape((np.shape(zonotope)[0], -1))
+    return result
+
+
+def compute_upper_lower_bounds(zonotope):
+    (l, u) = (zonotope[:, 0], zonotope[:, 0])
+    max = np.array(np.sum(np.abs(zonotope[:, 1:]), axis=1))
+    (l, u) = (l - max, l + max)
+    return l, u
+
+
+def verify(zonotope, true_label):
+    l, u = compute_upper_lower_bounds(zonotope)
+    threshold = l[true_label]
+    sorted_upper_bounds = sorted(u)
+    max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u[true_label] else sorted_upper_bounds[-2]
+
+    return int(max <= threshold)
 
 
 def main():
