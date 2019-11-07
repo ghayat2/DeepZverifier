@@ -5,8 +5,21 @@ from networks import FullyConnected, Conv
 DEVICE = 'cpu'
 INPUT_SIZE = 28
 
+def affine_transformer(zonotope, w_matrix):
+    return torch.mm(w_matrix, zonotope)
+
 
 def analyze(net, inputs, eps, true_label):
+    # reshape input to 784x1 matrix
+    inputs = inputs.reshape((INPUT_SIZE * INPUT_SIZE, 1)).float()
+    # creat tensor of size 781x1 with eps for all rows
+    eps_tensor = torch.Tensor(inputs.size()).fill_(eps).float()
+    zonotope = torch.cat((inputs, eps_tensor), dim=1)
+    print(zonotope)
+    for param in net.parameters():
+        print("w " + str(param.size()))
+        print("z " + str(zonotope.size()))
+        zonotope = affine_transformer(zonotope, param.data)
     return 0
 
 
