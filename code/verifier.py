@@ -25,8 +25,8 @@ def analyze(net, inputs, eps, true_label):
             zonotope = affine_dense(zonotope, sdt, mean)
 
         if isinstance(layer, torch.nn.Linear):
-            weight_matrix = list(net.parameters())[i - 2].data
-            bias = list(net.parameters())[i - 1].data
+            weight_matrix = list(net.parameters())[i - 2].data.float()
+            bias = list(net.parameters())[i - 1].data.float()
             zonotope = affine_dense(zonotope, weight_matrix, bias)
 
         if isinstance(layer, torch.nn.Conv2d):
@@ -36,6 +36,7 @@ def analyze(net, inputs, eps, true_label):
 
         if isinstance(layer, torch.nn.ReLU):
             zonotope = relu_fully_connected(zonotope)
+
     result = verify(zonotope, true_label)
     return result
 
@@ -81,7 +82,7 @@ def relu_fully_connected(zonotope):
             temp *= slope
             temp[0] -= (slope * l[i]) / 2
             result.append(torch.cat([temp, torch.zeros(added), (-(slope * l[i]) / 2).reshape(1)], 0))
-            print(result[-1])
+            # print(result[-1])
             added += 1
 
     target_size = zonotope.size()[1] + added
