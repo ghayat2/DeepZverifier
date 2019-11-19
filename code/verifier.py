@@ -1,26 +1,112 @@
 import argparse
 import torch
-from networks import FullyConnected, Conv
+from networks import FullyConnected, Conv, Normalization
+import numpy as np
+import torch.nn.functional as F
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
 
-def affine_transformer(zonotope, w_matrix):
-    return torch.mm(w_matrix, zonotope)
-
 
 def analyze(net, inputs, eps, true_label):
-    # reshape input to 784x1 matrix
-    inputs = inputs.reshape((INPUT_SIZE * INPUT_SIZE, 1)).float()
-    # creat tensor of size 781x1 with eps for all rows
-    eps_tensor = torch.Tensor(inputs.size()).fill_(eps).float()
-    zonotope = torch.cat((inputs, eps_tensor), dim=1)
-    print(zonotope)
-    for param in net.parameters():
-        print("w " + str(param.size()))
-        print("z " + str(zonotope.size()))
-        zonotope = affine_transformer(zonotope, param.data)
-    return 0
+    img_dim = INPUT_SIZE
+
+    inputs = inputs.reshape(-1)
+    noise =  torch.eye(len(inputs)) * eps
+    zonotope = torch.cat((inputs.reshape(1, -1), noise), dim=0).T
+
+    for i in range(len(net.layers)):
+        layer = net.layers[i]
+        if isinstance(layer, Normalization):
+            mean = layer.mean.item()
+            sigma = layer.sigma.item()
+            sdt = torch.eye(len(inputs)) * (1 / sigma)
+            mean = torch.ones(len(inputs)) * (-mean / sigma)
+            zonotope = affine_dense(zonotope, sdt, mean)
+
+        if isinstance(layer, torch.nn.Linear):
+            weight_matrix = list(net.parameters())[i - 2].data
+            bias = list(net.parameters())[i - 1].data
+            zonotope = affine_dense(zonotope, weight_matrix, bias)
+
+        if isinstance(layer, torch.nn.Conv2d):
+            weight_matrix = list(net.parameters())[i - 1].data.float()
+            bias = list(net.parameters())[i].data.float()
+            zonotope, img_dim = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+
+        if isinstance(layer, torch.nn.ReLU):
+            zonotope = relu_fully_connected(zonotope)
+    result = verify(zonotope, true_label)
+    return result
+
+
+def affine_dense(zonotope, weight_matrix, bias):
+    # result = np.matmul(weight_matrix, zonotope)
+    # result[:, 0] = result[:, 0] + bias
+    result = torch.mm(weight_matrix, zonotope)
+    result[:, 0] = result[:, 0] + bias
+    return result
+
+
+def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
+    zonotope = zonotope.reshape((layer.in_channels, img_dim, img_dim, -1))
+
+    result = []
+    for i in range(zonotope.shape[-1]):
+        if i != 0:
+            bias = None
+
+        temp = zonotope[:, :, :, i].reshape((1, layer.in_channels, img_dim, img_dim))
+        temp = F.conv2d(temp, weight_matrix, bias=bias,
+                        stride=layer.stride, padding=layer.padding)
+        result.append(temp.reshape(-1))
+
+    zonotope = torch.stack(result).T #np.array(result).T
+    img_dim = img_dim // layer.stride[0]
+    return zonotope, img_dim
+
+
+def relu_fully_connected(zonotope):
+    (l, u) = compute_upper_lower_bounds(zonotope)
+    result = []
+    added = 0
+    for i in range(len(zonotope)):
+        if l[i] >= 0:
+            result.append(zonotope[i])
+        elif u[i] <= 0:
+            result.append(torch.zeros(zonotope[1].size()))
+        else:
+            slope = u[i] / (u[i] - l[i])
+            temp = zonotope[i]
+            temp *= slope
+            temp[0] -= (slope * l[i]) / 2
+            result.append(torch.cat([temp, torch.zeros(added), (-(slope * l[i]) / 2).reshape(1)], 0))
+            print(result[-1])
+            added += 1
+
+    target_size = zonotope.size()[1] + added
+    for i in range(len(result)):
+        result[i] = torch.cat([result[i], torch.zeros((target_size - len(result[i])))])
+    result = torch.cat(result).reshape(zonotope.size()[0], -1)
+
+    return result
+
+
+def compute_upper_lower_bounds(zonotope):
+    (l, u) = (zonotope[:, 0], zonotope[:, 0])
+    max = torch.sum(torch.abs(zonotope[:, 1:]), dim=1)
+    (l, u) = (l - max, l + max)
+    return l, u
+
+
+def verify(zonotope, true_label):
+    l, u = compute_upper_lower_bounds(zonotope)
+    # print("l", l)
+    # print("u", u)
+    threshold = l[true_label]
+    sorted_upper_bounds = sorted(u)
+    max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u[true_label] else sorted_upper_bounds[-2]
+    return int(max <= threshold)
 
 
 def main():
