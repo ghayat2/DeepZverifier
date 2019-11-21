@@ -10,10 +10,8 @@ INPUT_SIZE = 28
 
 def analyze(net, inputs, eps, true_label):
     img_dim = INPUT_SIZE
-    inputs = inputs.reshape(-1)
-    noise = np.ones(shape=(len(inputs))) * eps
-    noise = np.diag(noise)
-    zonotope = np.concatenate((inputs.reshape(1, -1), noise), axis=0).T
+    inputs = inputs.numpy().reshape(-1)
+    zonotope = build_zonotope(inputs, eps)
 
     for i in range(len(net.layers)):
 
@@ -44,6 +42,22 @@ def analyze(net, inputs, eps, true_label):
     return result
 
 
+def build_zonotope(inputs, eps):
+
+    noise = np.ones(shape=(len(inputs))) * eps
+
+    for i, pixel in enumerate(inputs):
+        if pixel + eps > 1:
+            noise[i] = (1 - (inputs[i] - eps)) / 2
+            inputs[i] = 1 - noise[i]
+        if pixel - eps < 0:
+            noise[i] = (inputs[i] + eps) / 2
+            inputs[i] = noise[i]
+
+    noise = np.diag(noise)
+    zonotope = np.concatenate((inputs.reshape(1, -1), noise), axis=0).T
+    return zonotope
+
 def affine_dense(zonotope, weight_matrix, bias):
     result = np.matmul(weight_matrix, zonotope)
     result[:, 0] = result[:, 0] + bias
@@ -70,7 +84,7 @@ def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
     return zonotope, img_dim
 
 
-def relu(zonotope, slope=None):
+def relu(zonotope):
     (l, u) = compute_upper_lower_bounds(zonotope)
     result = []
     added = 0
@@ -79,11 +93,9 @@ def relu(zonotope, slope=None):
         if l[i] >= 0:
             result.append(zonotope[i])
         elif u[i] <= 0:
-            result.append(np.zeros(shape=np.shape(zonotope[1])))
+            result.append(np.zeros(shape=np.shape(zonotope[i])))
         else:
-            if slope is None:
-                slope = u[i] / (u[i] - l[i])
-
+            slope = u[i] / (u[i] - l[i])
             temp = zonotope[i]
             temp *= slope
             temp[0] -= (slope * l[i]) / 2
@@ -110,7 +122,6 @@ def verify(zonotope, true_label):
     threshold = l[true_label]
     sorted_upper_bounds = sorted(u)
     max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u[true_label] else sorted_upper_bounds[-2]
-
     return int(max <= threshold)
 
 
