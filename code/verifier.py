@@ -10,14 +10,13 @@ INPUT_SIZE = 28
 
 def analyze(net, inputs, eps, true_label):
     img_dim = INPUT_SIZE
-    inputs = inputs.reshape(-1)
-    noise = np.ones(shape=(len(inputs))) * eps
-    noise = np.diag(noise)
-    zonotope = np.concatenate((inputs.reshape(1, -1), noise), axis=0).T
+    inputs = inputs.numpy().reshape(-1)
+    zonotope = build_zonotope(inputs, eps)
 
     for i in range(len(net.layers)):
 
         layer = net.layers[i]
+
         if isinstance(layer, Normalization):
             mean = np.array(layer.mean).reshape(-1)[0]
             sigma = np.array(layer.sigma).reshape(-1)[0]
@@ -37,11 +36,27 @@ def analyze(net, inputs, eps, true_label):
             zonotope, img_dim = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
 
         if isinstance(layer, torch.nn.ReLU):
-            zonotope = relu_fully_connected(zonotope)
+            zonotope = relu(zonotope)
 
     result = verify(zonotope, true_label)
     return result
 
+
+def build_zonotope(inputs, eps):
+
+    noise = np.ones(shape=(len(inputs))) * eps
+
+    for i, pixel in enumerate(inputs):
+        if pixel + eps > 1:
+            noise[i] = (1 - (inputs[i] - eps)) / 2
+            inputs[i] = 1 - noise[i]
+        if pixel - eps < 0:
+            noise[i] = (inputs[i] + eps) / 2
+            inputs[i] = noise[i]
+
+    noise = np.diag(noise)
+    zonotope = np.concatenate((inputs.reshape(1, -1), noise), axis=0).T
+    return zonotope
 
 def affine_dense(zonotope, weight_matrix, bias):
     result = np.matmul(weight_matrix, zonotope)
@@ -55,21 +70,21 @@ def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
 
     for i in range(zonotope.shape[-1]):
         if i == 0:
-            bias = torch.from_numpy(bias)
+            bias_ = torch.from_numpy(bias)
         else:
-            bias = None
+            bias_ = None
 
         temp = zonotope[:, :, :, i].reshape((1, layer.in_channels, img_dim, img_dim))
-        temp = F.conv2d(torch.from_numpy(temp), torch.from_numpy(weight_matrix), bias,
+        temp = F.conv2d(torch.from_numpy(temp), torch.from_numpy(weight_matrix), bias=bias_,
                         stride=layer.stride, padding=layer.padding)
-        result.append(temp.numpy())
+        result.append(temp.numpy().reshape(-1))
 
-    zonotope = np.array(result).reshape((-1, zonotope.shape[-1]))
+    zonotope = np.array(result).T
     img_dim = img_dim // layer.stride[0]
     return zonotope, img_dim
 
 
-def relu_fully_connected(zonotope):
+def relu(zonotope):
     (l, u) = compute_upper_lower_bounds(zonotope)
     result = []
     added = 0
@@ -78,7 +93,7 @@ def relu_fully_connected(zonotope):
         if l[i] >= 0:
             result.append(zonotope[i])
         elif u[i] <= 0:
-            result.append(np.zeros(shape=np.shape(zonotope[1])))
+            result.append(np.zeros(shape=np.shape(zonotope[i])))
         else:
             slope = u[i] / (u[i] - l[i])
             temp = zonotope[i]
@@ -108,6 +123,14 @@ def verify(zonotope, true_label):
     sorted_upper_bounds = sorted(u)
     max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u[true_label] else sorted_upper_bounds[-2]
     return int(max <= threshold)
+
+
+def debug(zonotope, weight_matrix, bias):
+    print("############## DEBUG ##############")
+    print("Zonotope", np.shape(zonotope))
+    print("Weight matrix", np.shape(weight_matrix))
+    print("Bias", np.shape(bias))
+    print("###############################################")
 
 
 def main():
