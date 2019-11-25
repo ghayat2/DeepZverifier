@@ -3,6 +3,7 @@ import torch
 from networks import FullyConnected, Conv, Normalization
 import numpy as np
 import torch.nn.functional as F
+import time
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
@@ -40,18 +41,20 @@ def analyze(net, inputs, eps, true_label):
             res = []
             for zonotope in zonotopes:
                 (l, u) = compute_upper_lower_bounds(zonotope)
-                slope = u / (u - l)
-                temp = [relu(zonotope, l, u, slopes=np.zeros(slope.shape)),
-                        relu(zonotope, l, u, slopes=0.5 * slope),
-                        relu(zonotope, l, u, slopes=slope),
-                        relu(zonotope, l, u, slopes=(1 - slope) / 2 + slope),
-                        relu(zonotope, l, u, slopes=np.ones(slope.shape))]
-                res += temp
+                slopes = u / (u - l)
 
-            zonotopes = res
+                res.append(relu(zonotope, l, u, slopes=np.zeros(slopes.shape)))
+                res.append(relu(zonotope, l, u, slopes=0.5*slopes))
+                res.append(relu(zonotope, l, u, slopes=slopes))
+                res.append(relu(zonotope, l, u, slopes=slopes + (1-slopes)/2))
+                res.append(relu(zonotope, l, u, slopes=np.ones(slopes.shape)))
+
+            zonotopes.clear()
+            zonotopes += res.copy()
 
     result = np.array([verify(zonotope, true_label) for zonotope in zonotopes])
-    print(result)
+    ones = len([1 for r in result if r == 1])
+    print(len(result)-ones, " zeros, ", ones, " ones")
     return any(result > 0)
 
 
@@ -96,7 +99,7 @@ def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
     return zonotope
 
 
-def relu(zonotope, l, u, slopes=None):
+def relu(zonotope, l, u, slopes):
     result = []
     added = 0
 
@@ -110,13 +113,13 @@ def relu(zonotope, l, u, slopes=None):
             slope = slopes[i]
 
             if slope <= opt_slope:
-                temp = zonotope[i]
+                temp = np.array(zonotope[i])
                 temp *= slope
                 temp[0] += (u[i] / 2)*(1 - slope)
                 result.append(np.append(np.concatenate([temp, np.zeros(shape=added)]), (u[i] / 2)*(1 - slope)))
                 added += 1
             else:
-                temp = zonotope[i]
+                temp = np.array(zonotope[i])
                 temp *= slope
                 temp[0] -= l[i] * slope / 2
                 result.append(np.append(np.concatenate([temp, np.zeros(shape=added)]), -l[i] * slope / 2))
@@ -138,6 +141,7 @@ def compute_upper_lower_bounds(zonotope):
 
 
 def verify(zonotope, true_label):
+    #print(id(zonotope))
     l, u = compute_upper_lower_bounds(zonotope)
     threshold = l[true_label]
     sorted_upper_bounds = sorted(u)
@@ -196,11 +200,14 @@ def main():
     outs = net(inputs)
     pred_label = outs.max(dim=1)[1].item()
     assert pred_label == true_label
-
+    t1 = time.clock()
     if analyze(net, inputs, eps, true_label):
         print('verified')
     else:
         print('not verified')
+
+    t2 = time.clock()
+    print("Execution time: ", t2-t1, "s")
 
 
 if __name__ == '__main__':
