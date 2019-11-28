@@ -1,62 +1,143 @@
 import argparse
+import random
+from itertools import product
+
 import torch
 from networks import FullyConnected, Conv, Normalization
 import numpy as np
 import torch.nn.functional as F
+import time
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
+BRANCHING_FACTOR = 5
 
 
 def analyze(net, inputs, eps, true_label):
-    img_dim = INPUT_SIZE
+    num_relu_layers = len([0 for i in range(len(net.layers)) if isinstance(net.layers[i], torch.nn.ReLU)])
+    slopes_to_try = construct_set(BRANCHING_FACTOR, num_relu_layers)
+    result = 0
+
     inputs = inputs.numpy().reshape(-1)
-    zonotope = build_zonotope(inputs, eps)
 
-    for i in range(len(net.layers)):
+    calculation_set = []
 
-        layer = net.layers[i]
+    while not result and len(slopes_to_try) > 0:
 
-        if isinstance(layer, Normalization):
-            mean = np.array(layer.mean).reshape(-1)[0]
-            sigma = np.array(layer.sigma).reshape(-1)[0]
+        img_dim = INPUT_SIZE
+        indices = random.choice(tuple(slopes_to_try))
+        slopes_to_try.discard(indices)
+        zonotope = build_zonotope(inputs, eps)
+        num_relu = 0
+        print(net.layers)
+        
+        for i in range(len(net.layers)):
+            calculation_set.append([])
 
-            sdt = np.diag(np.ones(shape=len(inputs)) * (1 / sigma))
-            mean = np.ones(shape=len(inputs)) * (-mean / sigma)
-            zonotope = affine_dense(zonotope, sdt, mean)
+            layer = net.layers[i]
 
-        if isinstance(layer, torch.nn.Linear):
-            weight_matrix = list(net.parameters())[i - 2].data.numpy()
-            bias = list(net.parameters())[i - 1].data.numpy()
-            zonotope = affine_dense(zonotope, weight_matrix, bias)
+            if isinstance(layer, Normalization):
 
-        if isinstance(layer, torch.nn.Conv2d):
-            weight_matrix = list(net.parameters())[i - 1].data.numpy().astype(float)
-            bias = list(net.parameters())[i].data.numpy().astype(float)
-            zonotope, img_dim = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+                # calculate new zonotope
+                mean = np.array(layer.mean).reshape(-1)[0]
+                sigma = np.array(layer.sigma).reshape(-1)[0]
+                sdt = np.diag(np.ones(shape=len(inputs)) * (1 / sigma))
+                mean = np.ones(shape=len(inputs)) * (-mean / sigma)
+                zonotope = affine_dense(zonotope, sdt, mean)
 
-        if isinstance(layer, torch.nn.ReLU):
-            zonotope = relu(zonotope)
+                # save zonotope in calculation set
+                calculation_set[i].append(zonotope)
 
-    result = verify(zonotope, true_label)
+            if isinstance(layer, torch.nn.Flatten):
+
+                # save zonotope in calculation set
+                calculation_set[i].append(zonotope)
+
+            if isinstance(layer, torch.nn.Linear):
+
+                # create empty calculation set entries
+                for j in range(len(calculation_set[i-1])):
+                    calculation_set[i].append([])
+
+                # calculate new zonotope
+                weight_matrix = list(net.parameters())[i - 2].data.numpy()
+                bias = list(net.parameters())[i - 1].data.numpy()
+                zonotope = affine_dense(zonotope, weight_matrix, bias)
+                
+                # save zonotope in calculation set
+                if len(calculation_set[i-1]) > 1:
+                    calculation_set[i][indices[num_relu]] = zonotope
+                else:
+                    calculation_set[i][0] = zonotope
+
+            if isinstance(layer, torch.nn.Conv2d):
+                # create empty calculation set entries
+                for j in range(len(calculation_set[i-1])):
+                    calculation_set[i].append([])
+
+                # calculate new zonotope
+                weight_matrix = list(net.parameters())[i - 1].data.numpy().astype(float)
+                bias = list(net.parameters())[i].data.numpy().astype(float)
+                zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+                img_dim = img_dim // layer.stride[0]
+
+                # save zonotope in calculation set
+                if len(calculation_set[i-1]) > 1:
+                    calculation_set[i][indices[num_relu]] = zonotope
+                else:
+                    calculation_set[i][0] = zonotope
+
+            if isinstance(layer, torch.nn.ReLU):
+                # create empty calculation set entries
+                for j in range(len(calculation_set[i-1])):
+                    calculation_set[i].append([])
+
+                # calculate new zonotope
+                (l, u) = compute_upper_lower_bounds(zonotope)
+                slopes = u / (u - l)
+                if indices[num_relu] == 0:
+                    zonotope = relu(zonotope, l, u, slopes=np.zeros(slopes.shape))
+                elif indices[num_relu] == 1:
+                    zonotope = relu(zonotope, l, u, slopes=0.5 * slopes)
+                elif indices[num_relu] == 2:
+                    zonotope = relu(zonotope, l, u, slopes=slopes)
+                elif indices[num_relu] == 3:
+                    zonotope = relu(zonotope, l, u, slopes=slopes + (1 - slopes) / 2)
+                elif indices[num_relu] == 4:
+                    zonotope = relu(zonotope, l, u, slopes=np.ones(slopes.shape))
+                num_relu += 1
+
+                # save zonotope in calculation set
+                if len(calculation_set[i-1]) > 1:
+                    calculation_set[i][indices[num_relu]] = zonotope
+                else:
+                    calculation_set[i][0] = zonotope
+
+        result = verify(zonotope, true_label)
+
     return result
 
 
+def construct_set(branching_factor, n_relu_layer):
+    return set(product(range(branching_factor), repeat=n_relu_layer))
+
+
 def build_zonotope(inputs, eps):
-
     noise = np.ones(shape=(len(inputs))) * eps
+    input_copy = np.copy(inputs)
 
-    for i, pixel in enumerate(inputs):
+    for i, pixel in enumerate(input_copy):
         if pixel + eps > 1:
-            noise[i] = (1 - (inputs[i] - eps)) / 2
-            inputs[i] = 1 - noise[i]
+            noise[i] = (1 - (input_copy[i] - eps)) / 2
+            input_copy[i] = 1 - noise[i]
         if pixel - eps < 0:
-            noise[i] = (inputs[i] + eps) / 2
-            inputs[i] = noise[i]
+            noise[i] = (input_copy[i] + eps) / 2
+            input_copy[i] = noise[i]
 
     noise = np.diag(noise)
-    zonotope = np.concatenate((inputs.reshape(1, -1), noise), axis=0).T
+    zonotope = np.concatenate((input_copy.reshape(1, -1), noise), axis=0).T
     return zonotope
+
 
 def affine_dense(zonotope, weight_matrix, bias):
     result = np.matmul(weight_matrix, zonotope)
@@ -80,12 +161,10 @@ def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
         result.append(temp.numpy().reshape(-1))
 
     zonotope = np.array(result).T
-    img_dim = img_dim // layer.stride[0]
-    return zonotope, img_dim
+    return zonotope
 
 
-def relu(zonotope):
-    (l, u) = compute_upper_lower_bounds(zonotope)
+def relu(zonotope, l, u, slopes):
     result = []
     added = 0
 
@@ -95,12 +174,21 @@ def relu(zonotope):
         elif u[i] <= 0:
             result.append(np.zeros(shape=np.shape(zonotope[i])))
         else:
-            slope = u[i] / (u[i] - l[i])
-            temp = zonotope[i]
-            temp *= slope
-            temp[0] -= (slope * l[i]) / 2
-            result.append(np.append(np.concatenate([temp, np.zeros(shape=added)]), -(slope * l[i]) / 2))
-            added += 1
+            opt_slope = u[i] / (u[i] - l[i])
+            slope = slopes[i]
+
+            if slope <= opt_slope:
+                temp = np.array(zonotope[i])
+                temp *= slope
+                temp[0] += (u[i] / 2) * (1 - slope)
+                result.append(np.append(np.concatenate([temp, np.zeros(shape=added)]), (u[i] / 2) * (1 - slope)))
+                added += 1
+            else:
+                temp = np.array(zonotope[i])
+                temp *= slope
+                temp[0] -= l[i] * slope / 2
+                result.append(np.append(np.concatenate([temp, np.zeros(shape=added)]), -l[i] * slope / 2))
+                added += 1
 
     target_size = np.shape(zonotope)[1] + added
     for i in range(len(result)):
@@ -177,10 +265,13 @@ def main():
     pred_label = outs.max(dim=1)[1].item()
     assert pred_label == true_label
 
+    t = time.time()
     if analyze(net, inputs, eps, true_label):
         print('verified')
     else:
         print('not verified')
+
+    print("Execution time: ", time.time() - t, "s")
 
 
 if __name__ == '__main__':
