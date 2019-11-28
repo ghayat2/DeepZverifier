@@ -21,6 +21,7 @@ def analyze(net, inputs, eps, true_label):
     inputs = inputs.numpy().reshape(-1)
 
     calculation_set = construct_calculation_set(net.layers)
+    opt_zonotope_bounds = None
 
     while not result and len(slopes_to_try) > 0:
 
@@ -103,7 +104,7 @@ def analyze(net, inputs, eps, true_label):
 
                 num_relu += 1
 
-        result = verify(zonotope, true_label)
+        result, opt_zonotope_bounds = verify(zonotope, true_label, opt_zonotope_bounds)
 
     return result
 
@@ -222,12 +223,22 @@ def compute_upper_lower_bounds(zonotope):
     return l, u
 
 
-def verify(zonotope, true_label):
+def verify(zonotope, true_label, opt_zonotope_bounds):
     l, u = compute_upper_lower_bounds(zonotope)
-    threshold = l[true_label]
-    sorted_upper_bounds = sorted(u)
-    max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u[true_label] else sorted_upper_bounds[-2]
-    return int(max <= threshold)
+
+    if opt_zonotope_bounds is None:
+        l_opt = l
+        u_opt = u
+    else:
+        [l_opt, u_opt] = opt_zonotope_bounds
+        print(len(l_opt), len(u_opt))
+        l_opt = np.maximum(l_opt, l)
+        u_opt = np.minimum(u_opt, u)
+
+    threshold = l_opt[true_label]
+    sorted_upper_bounds = sorted(u_opt)
+    max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u_opt[true_label] else sorted_upper_bounds[-2]
+    return int(max <= threshold), [l_opt, u_opt]
 
 
 def main():
