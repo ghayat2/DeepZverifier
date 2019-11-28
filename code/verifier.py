@@ -34,7 +34,6 @@ def analyze(net, inputs, eps, true_label):
             layer = net.layers[i]
 
             if isinstance(layer, Normalization):
-
                 if calculation_set[i][0] is None:
                     # calculate new zonotope
                     mean = np.array(layer.mean).reshape(-1)[0]
@@ -49,7 +48,6 @@ def analyze(net, inputs, eps, true_label):
             if isinstance(layer, torch.nn.Flatten):
 
                 store_index = calc_store_index(indices, num_relu)
-
                 if calculation_set[i][store_index] is None:
                     calculation_set[i][store_index] = zonotope
                 else:
@@ -60,7 +58,6 @@ def analyze(net, inputs, eps, true_label):
                 store_index = calc_store_index(indices, num_relu)
 
                 if calculation_set[i][store_index] is None:
-                    prev_relu_index = indices[num_relu - 1]
                     weight_matrix = list(net.parameters())[i - 2].data.numpy()
                     bias = list(net.parameters())[i - 1].data.numpy()
                     zonotope = affine_dense(zonotope, weight_matrix, bias)
@@ -114,7 +111,7 @@ def calc_store_index(indices, num_relu):
     if num_relu is 0:
         return 0;
     else:
-        slope_index = indices[num_relu - 1] + 5 * calc_store_index(indices, num_relu - 1)
+        slope_index = indices[num_relu - 1] + BRANCHING_FACTOR * calc_store_index(indices, num_relu - 1)
         return slope_index
 
 
@@ -231,14 +228,6 @@ def verify(zonotope, true_label):
     sorted_upper_bounds = sorted(u)
     max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u[true_label] else sorted_upper_bounds[-2]
     return int(max <= threshold)
-
-
-def debug(zonotope, weight_matrix, bias):
-    print("############## DEBUG ##############")
-    print("Zonotope", np.shape(zonotope))
-    print("Weight matrix", np.shape(weight_matrix))
-    print("Bias", np.shape(bias))
-    print("###############################################")
 
 
 def main():
