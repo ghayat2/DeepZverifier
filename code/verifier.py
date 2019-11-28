@@ -20,7 +20,7 @@ def analyze(net, inputs, eps, true_label):
 
     inputs = inputs.numpy().reshape(-1)
 
-    calculation_set = []
+    calculation_set = construct_calculation_set(net.layers)
 
     while not result and len(slopes_to_try) > 0:
 
@@ -29,97 +29,117 @@ def analyze(net, inputs, eps, true_label):
         slopes_to_try.discard(indices)
         zonotope = build_zonotope(inputs, eps)
         num_relu = 0
-        print(net.layers)
         
         for i in range(len(net.layers)):
-            calculation_set.append([])
-
             layer = net.layers[i]
 
             if isinstance(layer, Normalization):
 
-                # calculate new zonotope
-                mean = np.array(layer.mean).reshape(-1)[0]
-                sigma = np.array(layer.sigma).reshape(-1)[0]
-                sdt = np.diag(np.ones(shape=len(inputs)) * (1 / sigma))
-                mean = np.ones(shape=len(inputs)) * (-mean / sigma)
-                zonotope = affine_dense(zonotope, sdt, mean)
-
-                # save zonotope in calculation set
-                calculation_set[i].append(zonotope)
+                if calculation_set[i][0] is None:
+                    # calculate new zonotope
+                    mean = np.array(layer.mean).reshape(-1)[0]
+                    sigma = np.array(layer.sigma).reshape(-1)[0]
+                    sdt = np.diag(np.ones(shape=len(inputs)) * (1 / sigma))
+                    mean = np.ones(shape=len(inputs)) * (-mean / sigma)
+                    zonotope = affine_dense(zonotope, sdt, mean)
+                    calculation_set[i][0] = zonotope
+                else:
+                    zonotope = calculation_set[i][0]
 
             if isinstance(layer, torch.nn.Flatten):
 
-                # save zonotope in calculation set
-                calculation_set[i].append(zonotope)
+                store_index = calc_store_index(indices, num_relu)
+
+                if calculation_set[i][store_index] is None:
+                    calculation_set[i][store_index] = zonotope
+                else:
+                    zonotope = calculation_set[i][store_index]
 
             if isinstance(layer, torch.nn.Linear):
 
-                # create empty calculation set entries
-                for j in range(len(calculation_set[i-1])):
-                    calculation_set[i].append([])
+                store_index = calc_store_index(indices, num_relu)
 
-                # calculate new zonotope
-                weight_matrix = list(net.parameters())[i - 2].data.numpy()
-                bias = list(net.parameters())[i - 1].data.numpy()
-                zonotope = affine_dense(zonotope, weight_matrix, bias)
-                
-                # save zonotope in calculation set
-                if len(calculation_set[i-1]) > 1:
-                    calculation_set[i][indices[num_relu]] = zonotope
+                if calculation_set[i][store_index] is None:
+                    prev_relu_index = indices[num_relu - 1]
+                    weight_matrix = list(net.parameters())[i - 2].data.numpy()
+                    bias = list(net.parameters())[i - 1].data.numpy()
+                    zonotope = affine_dense(zonotope, weight_matrix, bias)
+                    calculation_set[i][store_index] = zonotope
                 else:
-                    calculation_set[i][0] = zonotope
+                    zonotope = calculation_set[i][store_index]
 
             if isinstance(layer, torch.nn.Conv2d):
-                # create empty calculation set entries
-                for j in range(len(calculation_set[i-1])):
-                    calculation_set[i].append([])
 
-                # calculate new zonotope
-                weight_matrix = list(net.parameters())[i - 1].data.numpy().astype(float)
-                bias = list(net.parameters())[i].data.numpy().astype(float)
-                zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+                store_index = calc_store_index(indices, num_relu)
+
+                if calculation_set[i][store_index] is None:
+                    weight_matrix = list(net.parameters())[i - 1].data.numpy().astype(float)
+                    bias = list(net.parameters())[i].data.numpy().astype(float)
+                    zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+                    calculation_set[i][store_index] = zonotope
+                else:
+                    zonotope = calculation_set[i][store_index]
+                
                 img_dim = img_dim // layer.stride[0]
 
-                # save zonotope in calculation set
-                if len(calculation_set[i-1]) > 1:
-                    calculation_set[i][indices[num_relu]] = zonotope
-                else:
-                    calculation_set[i][0] = zonotope
-
             if isinstance(layer, torch.nn.ReLU):
-                # create empty calculation set entries
-                for j in range(len(calculation_set[i-1])):
-                    calculation_set[i].append([])
 
-                # calculate new zonotope
-                (l, u) = compute_upper_lower_bounds(zonotope)
-                slopes = u / (u - l)
-                if indices[num_relu] == 0:
-                    zonotope = relu(zonotope, l, u, slopes=np.zeros(slopes.shape))
-                elif indices[num_relu] == 1:
-                    zonotope = relu(zonotope, l, u, slopes=0.5 * slopes)
-                elif indices[num_relu] == 2:
-                    zonotope = relu(zonotope, l, u, slopes=slopes)
-                elif indices[num_relu] == 3:
-                    zonotope = relu(zonotope, l, u, slopes=slopes + (1 - slopes) / 2)
-                elif indices[num_relu] == 4:
-                    zonotope = relu(zonotope, l, u, slopes=np.ones(slopes.shape))
-                num_relu += 1
+                store_index = calc_store_index(indices, num_relu + 1)
 
-                # save zonotope in calculation set
-                if len(calculation_set[i-1]) > 1:
-                    calculation_set[i][indices[num_relu]] = zonotope
+                if calculation_set[i][store_index] is None:
+                    (l, u) = compute_upper_lower_bounds(zonotope)
+                    slopes = u / (u - l)
+                    if indices[num_relu] == 0:
+                        zonotope = relu(zonotope, l, u, slopes=np.zeros(slopes.shape))
+                    elif indices[num_relu] == 1:
+                        zonotope = relu(zonotope, l, u, slopes=0.5 * slopes)
+                    elif indices[num_relu] == 2:
+                        zonotope = relu(zonotope, l, u, slopes=slopes)
+                    elif indices[num_relu] == 3:
+                        zonotope = relu(zonotope, l, u, slopes=slopes + (1 - slopes) / 2)
+                    elif indices[num_relu] == 4:
+                        zonotope = relu(zonotope, l, u, slopes=np.ones(slopes.shape))
+
+                    calculation_set[i][store_index] = zonotope
                 else:
-                    calculation_set[i][0] = zonotope
+                    zonotope = calculation_set[i][store_index]
+
+                num_relu += 1
 
         result = verify(zonotope, true_label)
 
     return result
 
+def calc_store_index(indices, num_relu):
+    if num_relu is 0:
+        return 0;
+    else:
+        slope_index = indices[num_relu - 1] + 5 * calc_store_index(indices, num_relu - 1)
+        return slope_index
+
 
 def construct_set(branching_factor, n_relu_layer):
     return set(product(range(branching_factor), repeat=n_relu_layer))
+
+def construct_calculation_set(layers):
+    calculation_set = [];
+    for i in range(len(layers)):
+        calculation_set.append([])
+
+    for i in range(len(layers)):
+        layer = layers[i]
+        if isinstance(layer, Normalization):
+            calculation_set[i].append(None)
+        elif isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.Conv2d) or isinstance(layer, torch.nn.Flatten):
+            for j in range(len(calculation_set[i-1])):
+                calculation_set[i].append(None)
+        elif isinstance(layer, torch.nn.ReLU):
+            for j in range(len(calculation_set[i-1])):
+                for k in range(BRANCHING_FACTOR):
+                    calculation_set[i].append(None)
+
+    return calculation_set
+
 
 
 def build_zonotope(inputs, eps):
