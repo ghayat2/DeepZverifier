@@ -14,13 +14,15 @@ BRANCHING_FACTOR = 5
 
 
 def analyze(net, inputs, eps, true_label):
-    num_relu_layers = len([0 for i in range(len(net.layers)) if isinstance(net.layers[i], torch.nn.ReLU)])
+    layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
+    num_relu_layers = len([0 for i in range(len(layers)) if isinstance(layers[i], torch.nn.ReLU)])
     slopes_to_try = construct_set(BRANCHING_FACTOR, num_relu_layers)
     result = 0
 
     inputs = inputs.numpy().reshape(-1)
 
-    calculation_set = construct_calculation_set(net.layers)
+    calculation_set = construct_calculation_set(layers)
+    opt_zonotope_bounds = None
 
     while not result and len(slopes_to_try) > 0:
 
@@ -29,55 +31,39 @@ def analyze(net, inputs, eps, true_label):
         slopes_to_try.discard(indices)
         zonotope = build_zonotope(inputs, eps)
         num_relu = 0
-        
-        for i in range(len(net.layers)):
-            layer = net.layers[i]
+
+        for i in range(len(layers)):
+            layer = layers[i]
 
             if isinstance(layer, Normalization):
-                if calculation_set[i][0] is None:
-                    # calculate new zonotope
+                if calculation_set[i][num_relu] is None:
                     mean = np.array(layer.mean).reshape(-1)[0]
                     sigma = np.array(layer.sigma).reshape(-1)[0]
                     sdt = np.diag(np.ones(shape=len(inputs)) * (1 / sigma))
+
                     mean = np.ones(shape=len(inputs)) * (-mean / sigma)
                     zonotope = affine_dense(zonotope, sdt, mean)
-                    calculation_set[i][0] = zonotope
+
+                    calculation_set[i][num_relu] = zonotope
                 else:
                     zonotope = calculation_set[i][0]
 
-            if isinstance(layer, torch.nn.Flatten):
-
-                store_index = calc_store_index(indices, num_relu)
-                if calculation_set[i][store_index] is None:
-                    calculation_set[i][store_index] = zonotope
-                else:
-                    zonotope = calculation_set[i][store_index]
-
-            if isinstance(layer, torch.nn.Linear):
-
-                store_index = calc_store_index(indices, num_relu)
-
-                if calculation_set[i][store_index] is None:
-                    weight_matrix = list(net.parameters())[i - 2].data.numpy()
-                    bias = list(net.parameters())[i - 1].data.numpy()
-                    zonotope = affine_dense(zonotope, weight_matrix, bias)
-                    calculation_set[i][store_index] = zonotope
-                else:
-                    zonotope = calculation_set[i][store_index]
-
-            if isinstance(layer, torch.nn.Conv2d):
-
+            if isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.Conv2d):
                 store_index = calc_store_index(indices, num_relu)
 
                 if calculation_set[i][store_index] is None:
                     weight_matrix = list(net.parameters())[i - 1].data.numpy().astype(float)
                     bias = list(net.parameters())[i].data.numpy().astype(float)
-                    zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+
+                    zonotope = affine_dense(zonotope, weight_matrix, bias) if isinstance(layer, torch.nn.Linear) \
+                        else affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+
                     calculation_set[i][store_index] = zonotope
                 else:
                     zonotope = calculation_set[i][store_index]
-                
-                img_dim = img_dim // layer.stride[0]
+
+                if isinstance(layer, torch.nn.Conv2d):
+                    img_dim = img_dim // layer.stride[0]
 
             if isinstance(layer, torch.nn.ReLU):
 
@@ -103,13 +89,14 @@ def analyze(net, inputs, eps, true_label):
 
                 num_relu += 1
 
-        result = verify(zonotope, true_label)
+        result, opt_zonotope_bounds = verify(zonotope, true_label, opt_zonotope_bounds)
 
     return result
 
+
 def calc_store_index(indices, num_relu):
     if num_relu is 0:
-        return 0;
+        return 0
     else:
         slope_index = indices[num_relu - 1] + BRANCHING_FACTOR * calc_store_index(indices, num_relu - 1)
         return slope_index
@@ -118,25 +105,25 @@ def calc_store_index(indices, num_relu):
 def construct_set(branching_factor, n_relu_layer):
     return set(product(range(branching_factor), repeat=n_relu_layer))
 
+
 def construct_calculation_set(layers):
-    calculation_set = [];
+    calculation_set = []
+
     for i in range(len(layers)):
         calculation_set.append([])
-
-    for i in range(len(layers)):
         layer = layers[i]
+
         if isinstance(layer, Normalization):
             calculation_set[i].append(None)
-        elif isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.Conv2d) or isinstance(layer, torch.nn.Flatten):
-            for j in range(len(calculation_set[i-1])):
-                calculation_set[i].append(None)
+
+        elif isinstance(layer, torch.nn.Linear) \
+                or isinstance(layer, torch.nn.Conv2d):
+            calculation_set[i] += [None for _ in range(len(calculation_set[i - 1]))]
+
         elif isinstance(layer, torch.nn.ReLU):
-            for j in range(len(calculation_set[i-1])):
-                for k in range(BRANCHING_FACTOR):
-                    calculation_set[i].append(None)
+            calculation_set[i] += [None for _ in range(BRANCHING_FACTOR * len(calculation_set[i - 1]))]
 
     return calculation_set
-
 
 
 def build_zonotope(inputs, eps):
@@ -222,12 +209,23 @@ def compute_upper_lower_bounds(zonotope):
     return l, u
 
 
-def verify(zonotope, true_label):
+def verify(zonotope, true_label, opt_zonotope_bounds):
     l, u = compute_upper_lower_bounds(zonotope)
-    threshold = l[true_label]
-    sorted_upper_bounds = sorted(u)
-    max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u[true_label] else sorted_upper_bounds[-2]
-    return int(max <= threshold)
+
+    if opt_zonotope_bounds is None:
+        l_opt = l
+        u_opt = u
+    else:
+        [l_opt, u_opt] = opt_zonotope_bounds
+        l_opt = np.maximum(l_opt, l)
+        u_opt = np.minimum(u_opt, u)
+
+    """print("normal bounds", l, u)
+    print("opt bounds", l_opt, u_opt)"""
+    threshold = l_opt[true_label]
+    sorted_upper_bounds = sorted(u_opt)
+    max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u_opt[true_label] else sorted_upper_bounds[-2]
+    return int(max <= threshold), [l_opt, u_opt]
 
 
 def main():
