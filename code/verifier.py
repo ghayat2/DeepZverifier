@@ -220,8 +220,6 @@ def verify(zonotope, true_label, opt_zonotope_bounds):
         l_opt = np.maximum(l_opt, l)
         u_opt = np.minimum(u_opt, u)
 
-    """print("normal bounds", l, u)
-    print("opt bounds", l_opt, u_opt)"""
     threshold = l_opt[true_label]
     sorted_upper_bounds = sorted(u_opt)
     max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u_opt[true_label] else sorted_upper_bounds[-2]
@@ -278,7 +276,7 @@ def main():
     else:
         print('not verified')
 
-    print("Execution time: ", time.time() - t, "s")
+    #print("Execution time: ", time.time() - t, "s")
 
 
 if __name__ == '__main__':
