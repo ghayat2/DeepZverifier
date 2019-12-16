@@ -21,7 +21,6 @@ def analyze(net, inputs, eps, true_label):
     layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
     num_relu_layers = len([0 for i in range(len(layers)) if isinstance(layers[i], torch.nn.ReLU)])
     result = 0
-
     inputs = inputs.reshape(-1)
     initial_zonotope = build_zonotope(inputs, eps)
     slope_set = []
@@ -34,9 +33,10 @@ def analyze(net, inputs, eps, true_label):
     for param in list(net.parameters()):
         print("Param: ", param.size())"""
 
-    end = time.time() + 60 * 3
+    end = time.time() + 60 * 2
     start = time.time()
     while time.time() < end:
+
         img_dim = INPUT_SIZE
         num_relu = 0
 
@@ -62,21 +62,24 @@ def analyze(net, inputs, eps, true_label):
 
             if isinstance(layer, torch.nn.ReLU):
                 (l, u) = compute_upper_lower_bounds(zonotope)
-                if number_runs is 0:
+                if number_runs == 0:
                     slopes = torch.tensor(u / (u - l), requires_grad=True)
+                    # slopes = torch.rand(u.size(), requires_grad=True)
                     slope_set.append(slopes)
-
-                """print("The slope used in relu layers are: ")
-                for slopes in slope_set:
-                    print(slopes)"""
-
+                """elif number_runs % 2 == 0:
+                    slope_set[num_relu] = torch.distributions.normal.Normal(loc=slope_set[num_relu],
+                                                                            scale=torch.full(slope_set[num_relu].size(), 1e-2)).sample().requires_grad_(True)"""
                 zonotope = relu(zonotope, l, u, slopes=slope_set[num_relu])
                 num_relu = num_relu + 1
 
         # Early stop
+
         result = verify(zonotope, true_label)
         if result:
             print(time.time() - start)
+            print("The grad of slope used in relu layers are: ")
+            for slopes in slope_set:
+                print(slopes)
             return result
 
         # define optimizer and weights to train
@@ -93,38 +96,50 @@ def analyze(net, inputs, eps, true_label):
         current_loss.backward()
         # print("Current loss is :", current_loss)"""
 
-        # diff = torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]
-        sorted_upper_bounds = u.sort(dim=0)
-        max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
+        """diff = u - l[true_label]
+        diff[true_label] = 0  # we don't to lower difference between upper and lower bounds for true class
+        poly = 1 + diff
+        loss = torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]"""
 
+        maxs = u.topk(2)
+        max = maxs[0][0] if maxs[1][0].item() is not true_label else maxs[0][1]
         # loss = torch.log(max - l[true_label])**3
-        loss = max - l[true_label]
 
-        optimizer.zero_grad()
+        loss = max - l[true_label]
+        print("Run: ", number_runs, "; The loss is : ", loss)
+
         loss.backward()
 
         # print("loss", loss.item(),  "l[true_label]: ", l[true_label].detach().numpy(), "max u: ", max.detach().numpy())
 
-
-        #print("Size of slope_set", len(slope_set[0]))
+        # print("Size of slope_set", len(slope_set[0]))
         # step
         # print("Before optimizer", slope_set[0].grad)
         t1 = slope_set[0].grad
+        # adjust_learning_rate(optimizer, number_runs, 0.01)
         optimizer.step()
-        #print("After optimizer", slope_set[0].grad)
+        optimizer.zero_grad()
+        # print("After optimizer", slope_set[0].grad)
         t2 = slope_set[0].grad
 
         # print("Changed: ", False in [t1[i] == t2[i] for i in range(len(t1))])
 
         # clip and repeat
-        for s in range(len(slope_set)):
-            slope_set[s].data = slope_set[s].data.clamp(0, 1)
+        """for s in range(len(slope_set)):
+            slope_set[s].data = slope_set[s].data.clamp(0, 1)"""
 
         # clear gradients
         optimizer.zero_grad()
         number_runs = number_runs + 1
 
     return result
+
+
+def adjust_learning_rate(optimizer, epoch, init_lr):
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    lr = init_lr * (0.5 ** (epoch // 50))
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
 
 
 def build_zonotope(inputs, eps):
@@ -192,7 +207,8 @@ def relu(zonotope, l, u, slopes):
                 temp = zonotope[i].clone()
                 temp *= slopes[i]
                 temp[0] -= l[i] * slopes[i] / 2
-                result.append(torch.cat([temp, torch.cat([torch.zeros(added), (-l[i] * slopes[i] / 2).reshape(1)], dim=0)],
+                result.append(
+                    torch.cat([temp, torch.cat([torch.zeros(added), (-l[i] * slopes[i] / 2).reshape(1)], dim=0)],
                               axis=0))
 
                 # result.append(t)
