@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 from networks import FullyConnected, Conv, Normalization
+from verifier_conv import analyze_conv
 import numpy as np
 import torch.nn.functional as F
 import time
@@ -20,6 +21,10 @@ LEARNING_RATE = 0.00001
 def analyze(net, inputs, eps, true_label):
     layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
     num_relu_layers = len([0 for i in range(len(layers)) if isinstance(layers[i], torch.nn.ReLU)])
+
+    if np.array([isinstance(layer, torch.nn.Conv2d) for layer in layers]).any():
+        return analyze_conv(net, inputs, eps, true_label)
+
     result = 0
     inputs = inputs.reshape(-1)
     initial_zonotope = build_zonotope(inputs, eps)
@@ -42,14 +47,18 @@ def analyze(net, inputs, eps, true_label):
 
         for i in range(len(layers)):
             layer = layers[i]
-
+            t1 = time.time()
+            print("Starting normalization layer...")
             if isinstance(layer, Normalization):
                 mean = layer.mean.reshape(-1)[0]
                 sigma = layer.sigma.reshape(-1)[0]
                 sdt = torch.eye(n=inputs.size(0)) * (1 / sigma)
                 mean = torch.ones(size=inputs.size()) * (-mean / sigma)
                 zonotope = affine_dense(initial_zonotope, sdt, mean)
-
+            t2 = time.time()
+            print("Completed in: ", t2-t1)
+            t1 = time.time()
+            print("Starting ", layer, "layer...")
             if isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.Conv2d):
                 weight_matrix = list(net.parameters())[i - 1].type(torch.float32)
                 bias = list(net.parameters())[i].type(torch.float32)
@@ -60,6 +69,10 @@ def analyze(net, inputs, eps, true_label):
                     zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
                     img_dim = img_dim // layer.stride[0]
 
+            t2 = time.time()
+            print("Completed in ", t2-t1)
+            t1 = time.time()
+            print("Starting ReLu layer...")
             if isinstance(layer, torch.nn.ReLU):
                 (l, u) = compute_upper_lower_bounds(zonotope)
                 if number_runs == 0:
@@ -73,7 +86,8 @@ def analyze(net, inputs, eps, true_label):
                 num_relu = num_relu + 1
 
         # Early stop
-
+        t2 = time.time()
+        print("Complted in ", t2-t1)
         result = verify(zonotope, true_label)
         if result:
             print(time.time() - start)
@@ -107,7 +121,8 @@ def analyze(net, inputs, eps, true_label):
 
         loss = max - l[true_label]
         print("Run: ", number_runs, "; The loss is : ", loss)
-
+        print("Backwards the loss...")
+        print("Num slopes to optimize: ", np.array([slopes.size() for slopes in slope_set]).sum())
         loss.backward()
 
         # print("loss", loss.item(),  "l[true_label]: ", l[true_label].detach().numpy(), "max u: ", max.detach().numpy())
@@ -117,6 +132,7 @@ def analyze(net, inputs, eps, true_label):
         # print("Before optimizer", slope_set[0].grad)
         t1 = slope_set[0].grad
         # adjust_learning_rate(optimizer, number_runs, 0.01)
+        print("Optimizer step...")
         optimizer.step()
         optimizer.zero_grad()
         # print("After optimizer", slope_set[0].grad)
