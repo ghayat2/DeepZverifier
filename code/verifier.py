@@ -1,7 +1,4 @@
 import argparse
-import random
-from itertools import product
-
 import torch
 import torch.optim as optim
 from networks import FullyConnected, Conv, Normalization
@@ -15,25 +12,17 @@ LEARNING_RATE = 0.00001
 
 
 def analyze(net, inputs, eps, true_label):
-
-    # set autograd for model parameters to false
-    for param in net.parameters():
-        param.requires_grad = False
-
-    pytorch_total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
-    print(pytorch_total_params)
-
     layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
+    total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
+
     inputs = inputs.reshape(-1)
     initial_zonotope = build_zonotope(inputs, eps)
-
-    total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
 
     slope_set = []
     number_runs = 0
     result = 0
 
-    end = time.time() + 60 * 2 * 12 # server est approx 12x plus rapide que mon ordi
+    end = time.time() + 60 * 2 * 12  # server est approx 12x plus rapide que mon ordi
     start = time.time()
 
     while time.time() < end:
@@ -65,20 +54,19 @@ def analyze(net, inputs, eps, true_label):
                 if number_runs is 0:
                     u = u.detach()
                     l = l.detach()
-                    # slopes = torch.tensor(u / (u - l), requires_grad=True)
 
-                    if num_relu - total_num_relu >= -1:
+                    if num_relu - total_num_relu >= -7:
                         slopes = torch.tensor(u / (u - l), requires_grad=True)
                         print("Optimizing")
                     else:
                         slopes = torch.tensor(u / (u - l), requires_grad=False)
                         print("Not optimizing")
-                    
+                    # slopes = torch.tensor(u / (u - l), requires_grad=True)
+
                     slope_set.append(slopes)
 
                 zonotope = relu(zonotope, l, u, slopes=slope_set[num_relu])
                 num_relu = num_relu + 1
-
 
         # Early stop
         result = verify(zonotope, true_label)
@@ -87,30 +75,28 @@ def analyze(net, inputs, eps, true_label):
             return result
 
         # define optimizer and weights to train
-        optimizer = optim.Adam(slope_set, lr=0.01)
+        optimizer = optim.Adam(slope_set, lr=0.003)
 
         # calculate loss
         (l, u) = compute_upper_lower_bounds(zonotope)
         diff = u - l[true_label]
         diff[true_label] = 0
         poly = diff + 1
-
-        # loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label])**2
-        cel = u
-        cel[true_label] = l[true_label]
-        loss = torch.nn.CrossEntropyLoss()((cel).reshape(1, -1), torch.tensor(true_label).reshape(1))
-        
+        loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
         sorted_upper_bounds = u.sort(dim=0)
         max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
         # loss = torch.log(max - l[true_label])
         # loss = max - l[true_label]
-        param_opts = sum(p.numel() for p in slope_set if p.requires_grad)
-        print("Optimizing for ", param_opts)
+        # print("Number of params to optimize: ", sum([slopes.size()[0] for slopes in slope_set]) )
+        params = sum(p.numel() for p in slope_set if p.requires_grad)
+        print("PARAMS ", params)
+        print("Calling backwards..")
+        t1 = time.time()
         loss.backward()
-
+        print("Done in ", time.time() - t1, "s")
         optimizer.step()
 
-        print("loss", loss.item(),  "l[true_label]: ", l[true_label].detach().numpy(), "max u: ", max.detach().numpy())
+        print("loss", loss.item(), "l[true_label]: ", l[true_label].detach().numpy(), "max u: ", max.detach().numpy())
 
         for s in range(len(slope_set)):
             slope_set[s].data = torch.clamp(slope_set[s].data, min=0)
@@ -133,6 +119,7 @@ def build_zonotope(inputs, eps):
         if pixel - eps < 0:
             noise[i] = (input_copy[i] + eps) / 2
             input_copy[i] = noise[i]
+
     noise = torch.diag(noise)
     zonotope = torch.cat([input_copy.reshape(1, -1), noise], dim=0).T
     return zonotope
@@ -156,6 +143,7 @@ def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
         result += [temp.reshape(1, -1)]
 
     zonotope = torch.stack(result).squeeze(1).T
+
     return zonotope
 
 
@@ -165,12 +153,12 @@ def relu(zonotope, l, u, slopes):
         if l[i] < 0 and u[i] > 0:
             added_dims += 1
 
-    result = torch.zeros((zonotope.size(0), zonotope.size(1)+added_dims))
+    result = torch.zeros((zonotope.size(0), zonotope.size(1) + added_dims))
 
     added = 0
     for i in range(zonotope.size(0)):
         if l[i] >= 0:
-            result[i,:zonotope.size(1)] = zonotope[i].clone()
+            result[i, :zonotope.size(1)] = zonotope[i].clone()
         elif u[i] <= 0:
             continue
             # result[i] = torch.zeros(zonotope[i].size())
@@ -194,9 +182,45 @@ def relu(zonotope, l, u, slopes):
                 temp *= slopes[i]
                 temp[0] += (0.5 * u[i] * (slopes[i] - 1) - 0.5 * slopes[i] * l[i])
                 result[i, :zonotope.size(1)] = temp
-                result[i, zonotope.size(1) + added] = (-0.5 * u[i] * (slopes[i] - 1) - 0.5 * slopes[i] * l[i]).reshape(1)
+                result[i, zonotope.size(1) + added] = (-0.5 * u[i] * (slopes[i] - 1) - 0.5 * slopes[i] * l[i]).reshape(
+                    1)
                 added += 1
     return result
+
+
+def relu_tmp(zonotope, l, u, slopes):
+    added_dims = 0
+    for i in range(zonotope.size(0)):
+        if l[i] < 0 and u[i] > 0:
+            added_dims += 1
+
+    result = torch.zeros((zonotope.size(0), zonotope.size(1) + added_dims))
+
+    added = 0
+    for i in range(zonotope.size(0)):
+        if l[i] >= 0:
+            result[i, :zonotope.size(1)] = zonotope[i].clone()
+        elif u[i] <= 0:
+            continue
+            # result[i] = torch.zeros(zonotope[i].size())
+        else:
+            opt_slope = u[i] / (u[i] - l[i])
+            if slopes[i] <= opt_slope:
+                temp = zonotope[i].clone()
+                temp *= slopes[i]
+                temp[0] += (u[i] / 2) * (1 - slopes[i])
+                result[i, :zonotope.size(1)] = temp
+                result[i, zonotope.size(1) + added] = ((u[i] / 2) * (1 - slopes[i])).reshape(1)
+                added += 1
+            else:
+                temp = zonotope[i].clone()
+                temp *= slopes[i]
+                temp[0] -= l[i] * slopes[i] / 2
+                result[i, :zonotope.size(1)] = temp
+                result[i, zonotope.size(1) + added] = (-l[i] * slopes[i] / 2).reshape(1)
+                added += 1
+    return result
+
 
 def compute_upper_lower_bounds(zonotope):
     (l, u) = (zonotope[:, 0], zonotope[:, 0])
@@ -204,12 +228,14 @@ def compute_upper_lower_bounds(zonotope):
     (l, u) = (l - max, l + max)
     return l, u
 
+
 def verify(zonotope, true_label):
     l, u = compute_upper_lower_bounds(zonotope)
     threshold = l[true_label]
     sorted_upper_bounds = u.sort(dim=0)
     max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
     return int(max <= threshold)
+
 
 def main():
     warnings.filterwarnings('ignore')
