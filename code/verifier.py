@@ -1,4 +1,7 @@
 import argparse
+import random
+from itertools import product
+
 import torch
 import torch.optim as optim
 from networks import FullyConnected, Conv, Normalization
@@ -130,7 +133,6 @@ def build_zonotope(inputs, eps):
         if pixel - eps < 0:
             noise[i] = (input_copy[i] + eps) / 2
             input_copy[i] = noise[i]
-
     noise = torch.diag(noise)
     zonotope = torch.cat([input_copy.reshape(1, -1), noise], dim=0).T
     return zonotope
@@ -154,7 +156,6 @@ def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
         result += [temp.reshape(1, -1)]
 
     zonotope = torch.stack(result).squeeze(1).T
-
     return zonotope
 
 
@@ -197,47 +198,11 @@ def relu(zonotope, l, u, slopes):
                 added += 1
     return result
 
-
-def relu_tmp(zonotope, l, u, slopes):
-    added_dims = 0
-    for i in range(zonotope.size(0)):
-        if l[i] < 0 and u[i] > 0:
-            added_dims += 1
-
-    result = torch.zeros((zonotope.size(0), zonotope.size(1)+added_dims))
-
-    added = 0
-    for i in range(zonotope.size(0)):
-        if l[i] >= 0:
-            result[i,:zonotope.size(1)] = zonotope[i].clone()
-        elif u[i] <= 0:
-            continue
-            # result[i] = torch.zeros(zonotope[i].size())
-        else:
-            opt_slope = u[i] / (u[i] - l[i])
-            if slopes[i] <= opt_slope:
-                temp = zonotope[i].clone()
-                temp *= slopes[i]
-                temp[0] += (u[i] / 2) * (1 - slopes[i])
-                result[i,:zonotope.size(1)] = temp
-                result[i, zonotope.size(1)+added] = ((u[i] / 2) * (1 - slopes[i])).reshape(1)
-                added += 1
-            else:
-                temp = zonotope[i].clone()
-                temp *= slopes[i]
-                temp[0] -= l[i] * slopes[i] / 2
-                result[i, :zonotope.size(1)] = temp
-                result[i, zonotope.size(1) + added] = (-l[i] * slopes[i] / 2).reshape(1)
-                added += 1
-    return result
-
-
 def compute_upper_lower_bounds(zonotope):
     (l, u) = (zonotope[:, 0], zonotope[:, 0])
     max = torch.sum(torch.abs(zonotope[:, 1:]), dim=1)
     (l, u) = (l - max, l + max)
     return l, u
-
 
 def verify(zonotope, true_label):
     l, u = compute_upper_lower_bounds(zonotope)
@@ -245,7 +210,6 @@ def verify(zonotope, true_label):
     sorted_upper_bounds = u.sort(dim=0)
     max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
     return int(max <= threshold)
-
 
 def main():
     warnings.filterwarnings('ignore')
