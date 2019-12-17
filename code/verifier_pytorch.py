@@ -1,93 +1,166 @@
 import argparse
 import torch
+import torch.optim as optim
 from networks import FullyConnected, Conv, Normalization
-import numpy as np
 import torch.nn.functional as F
+import time
+import warnings
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
+LEARNING_RATE = 0.00001
 
 
 def analyze(net, inputs, eps, true_label):
-    img_dim = INPUT_SIZE
+    layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
+    inputs = inputs.reshape(-1)
+    initial_zonotope = build_zonotope(inputs, eps)
 
-    inputs = inputs.reshape(-1).double()
-    noise =  (torch.eye(len(inputs)) * eps).double()
-    zonotope = torch.cat((inputs.reshape(1, -1), noise), dim=0).T.double()
+    slope_set = []
+    number_runs = 0
+    result = 0
+
+    end = time.time() + 60 * 3
+    start = time.time()
+
+    while time.time() < end:
+        img_dim = INPUT_SIZE
+        num_relu = 0
+
+        for i in range(len(layers)):
+            layer = layers[i]
+
+            if isinstance(layer, Normalization):
+                mean = layer.mean.reshape(-1)[0]
+                sigma = layer.sigma.reshape(-1)[0]
+                sdt = torch.eye(n=inputs.size(0)) * (1 / sigma)
+                mean = torch.ones(size=inputs.size()) * (-mean / sigma)
+                zonotope = affine_dense(initial_zonotope, sdt, mean)
+
+            if isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.Conv2d):
+                weight_matrix = list(net.parameters())[i - 1].type(torch.float32)
+                bias = list(net.parameters())[i].type(torch.float32)
+
+                if isinstance(layer, torch.nn.Linear):
+                    zonotope = affine_dense(zonotope, weight_matrix, bias)
+                else:
+                    zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+                    img_dim = img_dim // layer.stride[0]
+
+            if isinstance(layer, torch.nn.ReLU):
+                (l, u) = compute_upper_lower_bounds(zonotope)
+                if number_runs is 0:
+                    u = u.detach()
+                    l = l.detach()
+                    slopes = torch.autograd.Variable(torch.tensor(u / (u - l)).clamp(0, 1), requires_grad=True)
+                    slope_set.append(slopes)
+
+                zonotope = relu(zonotope, l, u, slopes=slope_set[num_relu])
+                num_relu = num_relu + 1
 
 
-    for i in range(len(net.layers)):
-        layer = net.layers[i]
-        if isinstance(layer, Normalization):
-            mean = layer.mean.double().item()
-            sigma = layer.sigma.double().item()
-            sdt = torch.eye(len(inputs)) * (1 / sigma)
-            mean = torch.ones(len(inputs)) * (-mean / sigma)
-            zonotope = affine_dense(zonotope, sdt, mean)
+        # Early stop
+        result = verify(zonotope, true_label)
+        if result:
+            print(time.time() - start)
+            return result
 
-        if isinstance(layer, torch.nn.Linear):
-            weight_matrix = list(net.parameters())[i - 2].data.double()
-            bias = list(net.parameters())[i - 1].data.double()
-            zonotope = affine_dense(zonotope, weight_matrix, bias)
+        # define optimizer and weights to train
+        optimizer = optim.Adam(slope_set, lr=0.01)
 
-        if isinstance(layer, torch.nn.Conv2d):
-            weight_matrix = list(net.parameters())[i - 1].data.double()
-            bias = list(net.parameters())[i].data.double()
-            zonotope, img_dim = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
+        # calculate loss
+        (l, u) = compute_upper_lower_bounds(zonotope)
+        # diff = torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]
+        sorted_upper_bounds = u.sort(dim=0)
+        max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[1][-1] != u[true_label] else sorted_upper_bounds[0][-2]
+        print(max, l[true_label])
+        # loss = torch.log(max - l[true_label])**3
+        loss = max - l[true_label]
+        loss.backward()
 
-        if isinstance(layer, torch.nn.ReLU):
-            zonotope = relu(zonotope)
+        print("loss", loss.item(),  "l[true_label]: ", l[true_label].detach().numpy(), "max u: ", max.detach().numpy())
 
-    result = verify(zonotope, true_label)
+        # clip and repeat
+        for s in range(len(slope_set)):
+            slope_set[s].data = slope_set[s].data.clamp(0, 1)
+
+        # clear gradients
+        optimizer.zero_grad()
+        number_runs = number_runs + 1
+
     return result
 
 
+def build_zonotope(inputs, eps):
+    noise = torch.ones(size=[len(inputs)]) * eps
+    input_copy = inputs.clone()
+
+    for i, pixel in enumerate(input_copy):
+        if pixel + eps > 1:
+            noise[i] = (1 - (input_copy[i] - eps)) / 2
+            input_copy[i] = 1 - noise[i]
+        if pixel - eps < 0:
+            noise[i] = (input_copy[i] + eps) / 2
+            input_copy[i] = noise[i]
+
+    noise = torch.diag(noise)
+    zonotope = torch.cat([input_copy.reshape(1, -1), noise], dim=0).T
+    return zonotope
+
+
 def affine_dense(zonotope, weight_matrix, bias):
-    result = torch.mm(weight_matrix, zonotope)
+    result = torch.matmul(weight_matrix, zonotope)
     result[:, 0] = result[:, 0] + bias
     return result
 
 
 def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
     zonotope = zonotope.reshape((layer.in_channels, img_dim, img_dim, -1))
-
     result = []
+
     for i in range(zonotope.shape[-1]):
-        if i != 0:
-            bias = None
-
+        bias_ = bias if i == 0 else None
         temp = zonotope[:, :, :, i].reshape((1, layer.in_channels, img_dim, img_dim))
-        temp = F.conv2d(temp, weight_matrix, bias=bias,
+        temp = F.conv2d(temp, weight_matrix, bias=bias_,
                         stride=layer.stride, padding=layer.padding)
-        result.append(temp.reshape(-1))
+        result += [temp.reshape(1, -1)]
 
-    zonotope = torch.stack(result).T
-    img_dim = img_dim // layer.stride[0]
-    return zonotope, img_dim
+    zonotope = torch.stack(result).squeeze(1).T
+
+    return zonotope
 
 
-def relu(zonotope):
-    (l, u) = compute_upper_lower_bounds(zonotope)
-    result = []
+def relu(zonotope, l, u, slopes):
+    added_dims = 0
+    for i in range(zonotope.size(0)):
+        if l[i] < 0 and u[i] > 0:
+            added_dims += 1
+
+    result = torch.zeros((zonotope.size(0), zonotope.size(1)+added_dims))
+
     added = 0
-    for i in range(len(zonotope)):
+    for i in range(zonotope.size(0)):
         if l[i] >= 0:
-            result.append(zonotope[i])
+            result[i,:zonotope.size(1)] = zonotope[i].clone()
         elif u[i] <= 0:
-            result.append(torch.zeros(zonotope[1].size()))
+            continue
+            # result[i] = torch.zeros(zonotope[i].size())
         else:
-            slope = u[i] / (u[i] - l[i])
-            temp = zonotope[i]
-            temp *= slope
-            temp[0] -= (slope * l[i]) / 2
-            result.append(torch.cat([temp, torch.zeros(added), (-(slope * l[i]) / 2).reshape(1)], 0))
-            added += 1
-
-    target_size = zonotope.size()[1] + added
-    for i in range(len(result)):
-        result[i] = torch.cat([result[i], torch.zeros((target_size - len(result[i])))])
-    result = torch.cat(result).reshape(zonotope.size()[0], -1)
-
+            opt_slope = u[i] / (u[i] - l[i])
+            if slopes[i] <= opt_slope:
+                temp = zonotope[i].clone()
+                temp *= slopes[i]
+                temp[0] += (u[i] / 2) * (1 - slopes[i])
+                result[i,:zonotope.size(1)] = temp
+                result[i, zonotope.size(1)+added] = ((u[i] / 2) * (1 - slopes[i])).reshape(1)
+                added += 1
+            else:
+                temp = zonotope[i].clone()
+                temp *= slopes[i]
+                temp[0] -= l[i] * slopes[i] / 2
+                result[i, :zonotope.size(1)] = temp
+                result[i, zonotope.size(1) + added] = (-l[i] * slopes[i] / 2).reshape(1)
+                added += 1
     return result
 
 
@@ -100,15 +173,14 @@ def compute_upper_lower_bounds(zonotope):
 
 def verify(zonotope, true_label):
     l, u = compute_upper_lower_bounds(zonotope)
-    print("l", l)
-    print("u", u)
     threshold = l[true_label]
-    sorted_upper_bounds = sorted(u)
-    max = sorted_upper_bounds[-1] if sorted_upper_bounds[-1] != u[true_label] else sorted_upper_bounds[-2]
+    sorted_upper_bounds = u.sort(dim=0)
+    max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
     return int(max <= threshold)
 
 
 def main():
+    warnings.filterwarnings('ignore')
     parser = argparse.ArgumentParser(description='Neural network verification using DeepZ relaxation')
     parser.add_argument('--net',
                         type=str,
@@ -152,10 +224,13 @@ def main():
     pred_label = outs.max(dim=1)[1].item()
     assert pred_label == true_label
 
+    t = time.time()
     if analyze(net, inputs, eps, true_label):
         print('verified')
     else:
         print('not verified')
+
+    # print("Execution time: ", time.time() - t, "s")
 
 
 if __name__ == '__main__':
