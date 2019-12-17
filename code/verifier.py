@@ -12,9 +12,19 @@ LEARNING_RATE = 0.00001
 
 
 def analyze(net, inputs, eps, true_label):
+
+    # set autograd for model parameters to false
+    for param in net.parameters():
+        param.requires_grad = False
+
+    pytorch_total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    print(pytorch_total_params)
+
     layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
     inputs = inputs.reshape(-1)
     initial_zonotope = build_zonotope(inputs, eps)
+
+    total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
 
     slope_set = []
     number_runs = 0
@@ -52,7 +62,15 @@ def analyze(net, inputs, eps, true_label):
                 if number_runs is 0:
                     u = u.detach()
                     l = l.detach()
-                    slopes = torch.tensor(u / (u - l), requires_grad=True)
+                    # slopes = torch.tensor(u / (u - l), requires_grad=True)
+
+                    if num_relu - total_num_relu >= -1:
+                        slopes = torch.tensor(u / (u - l), requires_grad=True)
+                        print("Optimizing")
+                    else:
+                        slopes = torch.tensor(u / (u - l), requires_grad=False)
+                        print("Not optimizing")
+                    
                     slope_set.append(slopes)
 
                 zonotope = relu(zonotope, l, u, slopes=slope_set[num_relu])
@@ -66,18 +84,25 @@ def analyze(net, inputs, eps, true_label):
             return result
 
         # define optimizer and weights to train
-        optimizer = optim.Adam(slope_set, lr=0.003)
+        optimizer = optim.Adam(slope_set, lr=0.01)
 
         # calculate loss
         (l, u) = compute_upper_lower_bounds(zonotope)
         diff = u - l[true_label]
         diff[true_label] = 0
         poly = diff + 1
-        loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label])**2
+
+        # loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label])**2
+        cel = u
+        cel[true_label] = l[true_label]
+        loss = torch.nn.CrossEntropyLoss()((cel).reshape(1, -1), torch.tensor(true_label).reshape(1))
+        
         sorted_upper_bounds = u.sort(dim=0)
         max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
         # loss = torch.log(max - l[true_label])
         # loss = max - l[true_label]
+        param_opts = sum(p.numel() for p in slope_set if p.requires_grad)
+        print("Optimizing for ", param_opts)
         loss.backward()
 
         optimizer.step()
