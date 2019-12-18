@@ -22,6 +22,7 @@ def analyze(net, inputs, eps, true_label):
     total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
     # Check if layers must be frozen
     threshold = -1 if (True in [isinstance(layer, torch.nn.Conv2d) for layer in layers]) else - total_num_relu
+    freeze = -threshold is not total_num_relu
 
     if DEBUG:
         print("Optimizing for", -threshold, " ReLU layers")
@@ -61,13 +62,12 @@ def analyze(net, inputs, eps, true_label):
                     zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
                     img_dim = img_dim // layer.stride[0]
 
-                if number_runs is 0 and threshold is not total_num_relu and layer is not layers[-1]:
+                if number_runs is 0 and freeze and layer is not layers[-1]:
                     saved_zonotope = zonotope.detach()
-                    print("Saved zonotope of size: ", zonotope.size())
 
             if isinstance(layer, torch.nn.ReLU):
 
-                if number_runs is not 0 and -threshold is not total_num_relu:
+                if number_runs is not 0 and freeze:
                     zonotope = saved_zonotope
 
                 (l, u) = compute_upper_lower_bounds(zonotope)
@@ -86,10 +86,9 @@ def analyze(net, inputs, eps, true_label):
 
         # define optimizer and weights to train
         optimizer = optim.Adam(slope_set, lr=0.01)
-
+        (l, u) = compute_upper_lower_bounds(zonotope)
         # calculate loss
         """ Exponential loss """
-        (l, u) = compute_upper_lower_bounds(zonotope)
         diff = u - l[true_label]
         diff[true_label] = 0
         poly = diff + 1
@@ -109,7 +108,7 @@ def analyze(net, inputs, eps, true_label):
         loss.backward()
         optimizer.step()
 
-        adjust_learning_rate(optimizer, number_runs, 0.01, 0.5, 50)
+        adjust_learning_rate(optimizer, number_runs, 0.01, 0.5, 200)
 
         if DEBUG:
             print(number_runs, "time", time.time() - start, "loss", loss.item(), "l[true_label]: ",
@@ -123,16 +122,14 @@ def analyze(net, inputs, eps, true_label):
         # clear gradients
         optimizer.zero_grad()
 
-        if number_runs is 0 and -threshold is not total_num_relu:
+        if number_runs is 0 and freeze:
             layers = layers[-2:]
             parameters = parameters[-2:]
             slope_set = [slope_set[-1]]
-            num_relu = 0
 
         number_runs = number_runs + 1
 
-
-    return result
+    return 0
 
 
 def freeze_all_but_last(threshold, num_relu, total_num_relu, l, u):
@@ -204,7 +201,7 @@ def relu(zonotope, l, u, slopes):
         if l[i] >= 0:
             result[i, :zonotope.size(1)] = zonotope[i].clone()
         elif u[i] <= 0:
-            continue
+            result[i,:zonotope.size(1)] = slopes[i]*torch.zeros(zonotope[i].size())
         else:
             opt_slope = u[i] / (u[i] - l[i])
             if slopes[i] <= opt_slope:
