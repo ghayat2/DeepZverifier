@@ -8,26 +8,36 @@ import warnings
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
-LEARNING_RATE = 0.00001
+DEBUG = True
 
 
 def analyze(net, inputs, eps, true_label):
-    layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
-    total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
+    # set autograd for model parameters to false
+    for param in net.parameters():
+        param.requires_grad = False
 
+    # Ignoring Flatten layers
+    layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
+    # Counting number of ReLU layers
+    total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
+    # Check if layers must be frozen
+    threshold = -1 if (True in [isinstance(layer, torch.nn.Conv2d) for layer in layers]) else - total_num_relu
+
+    if DEBUG:
+        print("Optimizing for", -threshold, " ReLU layers")
+
+    # Building zonotope
     inputs = inputs.reshape(-1)
     initial_zonotope = build_zonotope(inputs, eps)
 
     slope_set = []
     number_runs = 0
-    result = 0
-
-    end = time.time() + 60 * 2 * 12  # server est approx 12x plus rapide que mon ordi
     start = time.time()
 
-    while time.time() < end:
-        img_dim = INPUT_SIZE
+    # Loop until zonotope verifies or time out
+    while True:
         num_relu = 0
+        img_dim = INPUT_SIZE
 
         for i in range(len(layers)):
             layer = layers[i]
@@ -35,8 +45,9 @@ def analyze(net, inputs, eps, true_label):
             if isinstance(layer, Normalization):
                 mean = layer.mean.reshape(-1)[0]
                 sigma = layer.sigma.reshape(-1)[0]
-                sdt = torch.eye(n=inputs.size(0)) * (1 / sigma)
+                sdt = torch.eye(inputs.size(0)) * (1 / sigma)
                 mean = torch.ones(size=inputs.size()) * (-mean / sigma)
+
                 zonotope = affine_dense(initial_zonotope, sdt, mean)
 
             if isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.Conv2d):
@@ -52,60 +63,76 @@ def analyze(net, inputs, eps, true_label):
             if isinstance(layer, torch.nn.ReLU):
                 (l, u) = compute_upper_lower_bounds(zonotope)
                 if number_runs is 0:
-                    u = u.detach()
-                    l = l.detach()
-
-                    if num_relu - total_num_relu >= -7:
-                        slopes = torch.tensor(u / (u - l), requires_grad=True)
-                        print("Optimizing")
-                    else:
-                        slopes = torch.tensor(u / (u - l), requires_grad=False)
-                        print("Not optimizing")
-                    # slopes = torch.tensor(u / (u - l), requires_grad=True)
-
+                    u, l = u.detach(), l.detach()
+                    slopes = freeze_all_but_last(threshold, num_relu, total_num_relu, l, u)
                     slope_set.append(slopes)
 
                 zonotope = relu(zonotope, l, u, slopes=slope_set[num_relu])
                 num_relu = num_relu + 1
 
-        # Early stop
-        result = verify(zonotope, true_label)
-        if result:
-            print(time.time() - start)
-            return result
+        # Verifying stopping condition
+
+        if verify(zonotope, true_label):
+            return 1
 
         # define optimizer and weights to train
-        optimizer = optim.Adam(slope_set, lr=0.003)
+        optimizer = optim.Adam(slope_set, lr=0.01)
 
         # calculate loss
+        """ Exponential loss """
         (l, u) = compute_upper_lower_bounds(zonotope)
         diff = u - l[true_label]
         diff[true_label] = 0
         poly = diff + 1
         loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
+
         sorted_upper_bounds = u.sort(dim=0)
         max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
+
+        """Log loss """
         # loss = torch.log(max - l[true_label])
+        """Linear loss """
         # loss = max - l[true_label]
-        # print("Number of params to optimize: ", sum([slopes.size()[0] for slopes in slope_set]) )
-        params = sum(p.numel() for p in slope_set if p.requires_grad)
-        print("PARAMS ", params)
-        print("Calling backwards..")
-        t1 = time.time()
+
+        ##############################################################################
+
+        # Computing gradients and modifying slopes
         loss.backward()
-        print("Done in ", time.time() - t1, "s")
         optimizer.step()
 
-        print("loss", loss.item(), "l[true_label]: ", l[true_label].detach().numpy(), "max u: ", max.detach().numpy())
+        adjust_learning_rate(optimizer, number_runs, 0.01, 0.5, 50)
 
+        if DEBUG:
+            print(number_runs, "time", time.time() - start, "loss", loss.item(), "l[true_label]: ",
+                  l[true_label].detach().numpy(), "max u: ", max.detach().numpy(), "params",
+                  sum(p.numel() for p in slope_set if p.requires_grad))
+
+        # Clipping to ensure soundness
         for s in range(len(slope_set)):
-            slope_set[s].data = torch.clamp(slope_set[s].data, min=0)
+            slope_set[s].data = torch.clamp(slope_set[s].data, min=0, max=1)
 
         # clear gradients
         optimizer.zero_grad()
+
         number_runs = number_runs + 1
 
     return result
+
+
+def freeze_all_but_last(threshold, num_relu, total_num_relu, l, u):
+    if num_relu - total_num_relu >= threshold:
+        slopes = torch.tensor(u / (u - l), requires_grad=True)
+    else:
+        slopes = torch.tensor(u / (u - l), requires_grad=False)
+
+    return slopes
+
+
+def adjust_learning_rate(optimizer, epoch, init_lr, decay_rate, decay_freq):
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    lr = init_lr * (decay_rate ** (epoch // decay_freq))
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
 
 
 def build_zonotope(inputs, eps):
@@ -149,6 +176,7 @@ def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
 
 def relu(zonotope, l, u, slopes):
     added_dims = 0
+
     for i in range(zonotope.size(0)):
         if l[i] < 0 and u[i] > 0:
             added_dims += 1
@@ -161,48 +189,6 @@ def relu(zonotope, l, u, slopes):
             result[i, :zonotope.size(1)] = zonotope[i].clone()
         elif u[i] <= 0:
             continue
-            # result[i] = torch.zeros(zonotope[i].size())
-        else:
-            if slopes[i] == 0:
-                temp = zonotope[i].clone()
-                temp *= slopes[i]
-                temp[0] += u[i] / 2
-                result[i, :zonotope.size(1)] = temp
-                result[i, zonotope.size(1) + added] = (u[i] / 2).reshape(1)
-                added += 1
-            elif 0 < slopes[i] <= 1:
-                temp = zonotope[i].clone()
-                temp *= slopes[i]
-                temp[0] += 0.5 * max(- slopes[i] * l[i], u[i] * (1 - slopes[i]))
-                result[i, :zonotope.size(1)] = temp
-                result[i, zonotope.size(1) + added] = (0.5 * max(- slopes[i] * l[i], u[i] * (1 - slopes[i]))).reshape(1)
-                added += 1
-            else:
-                temp = zonotope[i].clone()
-                temp *= slopes[i]
-                temp[0] += (0.5 * u[i] * (slopes[i] - 1) - 0.5 * slopes[i] * l[i])
-                result[i, :zonotope.size(1)] = temp
-                result[i, zonotope.size(1) + added] = (-0.5 * u[i] * (slopes[i] - 1) - 0.5 * slopes[i] * l[i]).reshape(
-                    1)
-                added += 1
-    return result
-
-
-def relu_tmp(zonotope, l, u, slopes):
-    added_dims = 0
-    for i in range(zonotope.size(0)):
-        if l[i] < 0 and u[i] > 0:
-            added_dims += 1
-
-    result = torch.zeros((zonotope.size(0), zonotope.size(1) + added_dims))
-
-    added = 0
-    for i in range(zonotope.size(0)):
-        if l[i] >= 0:
-            result[i, :zonotope.size(1)] = zonotope[i].clone()
-        elif u[i] <= 0:
-            continue
-            # result[i] = torch.zeros(zonotope[i].size())
         else:
             opt_slope = u[i] / (u[i] - l[i])
             if slopes[i] <= opt_slope:
