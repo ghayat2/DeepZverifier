@@ -49,6 +49,10 @@ This method verifies that the image is still correctly classified when perturbed
     start = time.time()
     parameters = list(net.parameters())
 
+    learning_rate = 0.01
+    prev_loss = 0
+    loss_diff = 0
+
     # Loop until the zonotope is verified or a time out exception occurs
     while True:
         num_relu = 0
@@ -99,7 +103,7 @@ This method verifies that the image is still correctly classified when perturbed
             return 1
 
         # Define the optimizer and slopes to train
-        optimizer = optim.Adam(slope_set, lr=0.01)
+        optimizer = optim.Adam(slope_set, lr=learning_rate)
 
         (l, u) = compute_upper_lower_bounds(zonotope)
         # Calculate loss
@@ -107,6 +111,7 @@ This method verifies that the image is still correctly classified when perturbed
         diff = u - l[true_label]
         diff[true_label] = 0
         poly = diff + 1
+        
         loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
 
         sorted_upper_bounds = u.sort(dim=0)
@@ -122,12 +127,16 @@ This method verifies that the image is still correctly classified when perturbed
         optimizer.step()
 
         # Adjusting optimizer's learning rate
+        print("Loss diff", (prev_loss - loss).item());
+        loss_diff = np.abs
+        prev_loss = loss;
+
         adjust_learning_rate(optimizer, number_runs, 0.01, 0.5, 200)
 
         if DEBUG:
             print(number_runs, "time", time.time() - start, "loss", loss.item(), "l[true_label]: ",
-                  l[true_label].detach().numpy(), "max u: ", max.detach().numpy(), "params",
-                  sum(p.numel() for p in slope_set if p.requires_grad))
+                l[true_label].detach().numpy(), "max u: ", max.detach().numpy(), "params",
+                sum(p.numel() for p in slope_set if p.requires_grad))
 
         # Clipping to ensure soundness
         for s in range(len(slope_set)):
