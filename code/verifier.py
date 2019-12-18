@@ -29,11 +29,12 @@ def analyze(net, inputs, eps, true_label):
     # Building zonotope
     inputs = inputs.reshape(-1)
     initial_zonotope = build_zonotope(inputs, eps)
+    saved_zonotope = initial_zonotope
 
     slope_set = []
     number_runs = 0
     start = time.time()
-
+    parameters = list(net.parameters())
     # Loop until zonotope verifies or time out
     while True:
         num_relu = 0
@@ -51,8 +52,8 @@ def analyze(net, inputs, eps, true_label):
                 zonotope = affine_dense(initial_zonotope, sdt, mean)
 
             if isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.Conv2d):
-                weight_matrix = list(net.parameters())[i - 1].type(torch.float32)
-                bias = list(net.parameters())[i].type(torch.float32)
+                weight_matrix = parameters[i - 1].type(torch.float32)
+                bias = parameters[i].type(torch.float32)
 
                 if isinstance(layer, torch.nn.Linear):
                     zonotope = affine_dense(zonotope, weight_matrix, bias)
@@ -60,7 +61,15 @@ def analyze(net, inputs, eps, true_label):
                     zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
                     img_dim = img_dim // layer.stride[0]
 
+                if number_runs is 0 and threshold is not total_num_relu and layer is not layers[-1]:
+                    saved_zonotope = zonotope.detach()
+                    print("Saved zonotope of size: ", zonotope.size())
+
             if isinstance(layer, torch.nn.ReLU):
+
+                if number_runs is not 0 and -threshold is not total_num_relu:
+                    zonotope = saved_zonotope
+
                 (l, u) = compute_upper_lower_bounds(zonotope)
                 if number_runs is 0:
                     u, l = u.detach(), l.detach()
@@ -114,7 +123,14 @@ def analyze(net, inputs, eps, true_label):
         # clear gradients
         optimizer.zero_grad()
 
+        if number_runs is 0 and -threshold is not total_num_relu:
+            layers = layers[-2:]
+            parameters = parameters[-2:]
+            slope_set = [slope_set[-1]]
+            num_relu = 0
+
         number_runs = number_runs + 1
+
 
     return result
 
