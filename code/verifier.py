@@ -12,31 +12,44 @@ DEBUG = True
 
 
 def analyze(net, inputs, eps, true_label):
+    """
+This method verifies that the image is still correctly classified when perturbed by noise
+    :param net: The network
+    :param inputs: the image to verifiy
+    :param eps: the magnitude of noise with which the image is perturbed
+    :param true_label: the label of the image
+    :return: 1 if the image is verified under eps-noise , 0 else
+    """
     # set autograd for model parameters to false
     for param in net.parameters():
         param.requires_grad = False
 
-    # Ignoring Flatten layers
+    # Ignoring flatten layers
     layers = [layer for layer in net.layers if not isinstance(layer, torch.nn.Flatten)]
-    # Counting number of ReLU layers
+    # Counting the number of ReLU layers
     total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
-    # Check if layers must be frozen
+    # Check if layers must be frozen (Convolutional network must have all but last layer frozen while Dense network
+    # should have none frozen)
     threshold = -1 if (True in [isinstance(layer, torch.nn.Conv2d) for layer in layers]) else - total_num_relu
     freeze = -threshold is not total_num_relu
 
     if DEBUG:
         print("Optimizing for", -threshold, " ReLU layers")
 
-    # Building zonotope
+    # Building the zonotope
     inputs = inputs.reshape(-1)
     initial_zonotope = build_zonotope(inputs, eps)
+
+    # In the case of convolutional networks, the zonotope before the last ReLU layer will be saved to avoid
+    # re-computation at every run
     saved_zonotope = initial_zonotope
 
     slope_set = []
     number_runs = 0
     start = time.time()
     parameters = list(net.parameters())
-    # Loop until zonotope verifies or time out
+
+    # Loop until the zonotope is verified or a time out exception occurs
     while True:
         num_relu = 0
         img_dim = INPUT_SIZE
@@ -62,8 +75,10 @@ def analyze(net, inputs, eps, true_label):
                     zonotope = affine_conv(zonotope, layer, weight_matrix, bias, img_dim)
                     img_dim = img_dim // layer.stride[0]
 
+                # Saving the zonotope before last ReLU layer to avoid re-computation
                 if number_runs is 0 and freeze and layer is not layers[-1]:
                     saved_zonotope = zonotope.detach()
+                    print("Saved zonotope of size: ", zonotope.size())
 
             if isinstance(layer, torch.nn.ReLU):
 
@@ -80,14 +95,14 @@ def analyze(net, inputs, eps, true_label):
                 num_relu = num_relu + 1
 
         # Verifying stopping condition
-
         if verify(zonotope, true_label):
             return 1
 
-        # define optimizer and weights to train
+        # Define the optimizer and slopes to train
         optimizer = optim.Adam(slope_set, lr=0.01)
+
         (l, u) = compute_upper_lower_bounds(zonotope)
-        # calculate loss
+        # Calculate loss
         """ Exponential loss """
         diff = u - l[true_label]
         diff[true_label] = 0
@@ -102,12 +117,11 @@ def analyze(net, inputs, eps, true_label):
         """Linear loss """
         # loss = max - l[true_label]
 
-        ##############################################################################
-
         # Computing gradients and modifying slopes
         loss.backward()
         optimizer.step()
 
+        # Adjusting optimizer's learning rate
         adjust_learning_rate(optimizer, number_runs, 0.01, 0.5, 200)
 
         if DEBUG:
@@ -119,9 +133,10 @@ def analyze(net, inputs, eps, true_label):
         for s in range(len(slope_set)):
             slope_set[s].data = torch.clamp(slope_set[s].data, min=0, max=1)
 
-        # clear gradients
+        # Clear gradients
         optimizer.zero_grad()
 
+        # In the case of convolutional networks, only the slopes of the last ReLU layer will be optimized
         if number_runs is 0 and freeze:
             layers = layers[-2:]
             parameters = parameters[-2:]
@@ -133,6 +148,15 @@ def analyze(net, inputs, eps, true_label):
 
 
 def freeze_all_but_last(threshold, num_relu, total_num_relu, l, u):
+    """
+Creates the set of slopes of current ReLU layer. The slopes will be optimized depending on the current ReLU layer
+    :param threshold: -1 if all but last ReLU layer must be frozen, total_num_relu else
+    :param num_relu: the current ReLU layer
+    :param total_num_relu: total number of ReLU layers in the network
+    :param l: The lower bounds of the zonotope
+    :param u: The upper bounds of the zonotope
+    :return: the set of slopes associated with the current ReLU layer
+    """
     if num_relu - total_num_relu >= threshold:
         slopes = torch.tensor(u / (u - l), requires_grad=True)
     else:
@@ -142,16 +166,30 @@ def freeze_all_but_last(threshold, num_relu, total_num_relu, l, u):
 
 
 def adjust_learning_rate(optimizer, epoch, init_lr, decay_rate, decay_freq):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    """
+Adjusts the learning rate of the optimizer if needed
+    :param optimizer: The optimizer
+    :param epoch: The current run
+    :param init_lr: The initial learning rate
+    :param decay_rate: The rate at which the learning rate should decay
+    :param decay_freq: The frequency at which the learning rate should decay
+    """
     lr = init_lr * (decay_rate ** (epoch // decay_freq))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
 
 def build_zonotope(inputs, eps):
+    """
+Builds the zonotope
+    :param inputs: The image that should be verified
+    :param eps: The magnitude of noise with which the image is perturbed
+    :return: The zonotope abstracting the input image
+    """
     noise = torch.ones(size=[len(inputs)]) * eps
     input_copy = inputs.clone()
 
+    # Re centering centers and noise terms
     for i, pixel in enumerate(input_copy):
         if pixel + eps > 1:
             noise[i] = (1 - (input_copy[i] - eps)) / 2
@@ -166,12 +204,28 @@ def build_zonotope(inputs, eps):
 
 
 def affine_dense(zonotope, weight_matrix, bias):
+    """
+ Pushes the zonotope through the dense layer associated with the weight matrix and bias arguments
+    :param zonotope: The zonotope to be pushed
+    :param weight_matrix: Weights of the layer
+    :param bias: Bias of the layer
+    :return: The transformed zonotope
+    """
     result = torch.matmul(weight_matrix, zonotope)
     result[:, 0] = result[:, 0] + bias
     return result
 
 
 def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
+    """
+Pushes the zonotope through the convolution layer associated with the weight matrix and bias arguments
+    :param zonotope: The zonotope to be pushed
+    :param layer: Weights of the layer
+    :param weight_matrix:
+    :param bias: Bias of the layer
+    :param img_dim: The dimension of input
+    :return:The transformed zonotope
+    """
     zonotope = zonotope.reshape((layer.in_channels, img_dim, img_dim, -1))
     result = []
 
@@ -188,12 +242,21 @@ def affine_conv(zonotope, layer, weight_matrix, bias, img_dim):
 
 
 def relu(zonotope, l, u, slopes):
+    """
+Pushes the zonotope through the ReLU layer associated with the given set of slopes
+    :param zonotope: The zonotope to be pushed
+    :param l: The lower bounds of the zonotope
+    :param u: The upper bounds of the zontope
+    :param slopes: The set of slopes associated with each neuron of the layer
+    :return: The transformed zonotope
+    """
     added_dims = 0
 
     for i in range(zonotope.size(0)):
         if l[i] < 0 and u[i] > 0:
             added_dims += 1
 
+    # Pre-allocating the new zonotope with adjusted dimensions
     result = torch.zeros((zonotope.size(0), zonotope.size(1) + added_dims))
 
     added = 0
@@ -201,7 +264,7 @@ def relu(zonotope, l, u, slopes):
         if l[i] >= 0:
             result[i, :zonotope.size(1)] = zonotope[i].clone()
         elif u[i] <= 0:
-            result[i,:zonotope.size(1)] = slopes[i]*torch.zeros(zonotope[i].size())
+            result[i, :zonotope.size(1)] = slopes[i] * torch.zeros(zonotope[i].size())
         else:
             opt_slope = u[i] / (u[i] - l[i])
             if slopes[i] <= opt_slope:
@@ -222,6 +285,11 @@ def relu(zonotope, l, u, slopes):
 
 
 def compute_upper_lower_bounds(zonotope):
+    """
+Computes the lower and upper bounds of the zonotope
+    :param zonotope: The zonotope
+    :return: The lowe and upper bounds of the zonotope
+    """
     (l, u) = (zonotope[:, 0], zonotope[:, 0])
     max = torch.sum(torch.abs(zonotope[:, 1:]), dim=1)
     (l, u) = (l - max, l + max)
@@ -229,10 +297,17 @@ def compute_upper_lower_bounds(zonotope):
 
 
 def verify(zonotope, true_label):
+    """
+Checks if the zonotope is verified w.r.t the true label
+    :param zonotope: The zonotope
+    :param true_label: The label
+    :return: 1 if the zonotope is verified, 0 else
+    """
     l, u = compute_upper_lower_bounds(zonotope)
     threshold = l[true_label]
     sorted_upper_bounds = u.sort(dim=0)
     max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
+
     return int(max <= threshold)
 
 
@@ -281,13 +356,10 @@ def main():
     pred_label = outs.max(dim=1)[1].item()
     assert pred_label == true_label
 
-    t = time.time()
     if analyze(net, inputs, eps, true_label):
         print('verified')
     else:
         print('not verified')
-
-    # print("Execution time: ", time.time() - t, "s")
 
 
 if __name__ == '__main__':
