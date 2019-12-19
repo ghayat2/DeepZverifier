@@ -8,10 +8,11 @@ import warnings
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
-DEBUG = True
+DEBUG = False
 
 
-def analyze(net, inputs, eps, true_label):
+def analyze(net, inputs, eps, true_label, model):
+    print(model)
     """
 This method verifies that the image is still correctly classified when perturbed by noise
     :param net: The network
@@ -49,12 +50,14 @@ This method verifies that the image is still correctly classified when perturbed
     start = time.time()
     parameters = list(net.parameters())
 
-    learning_rate = 0.01
+    learning_rate = 0.1
     prev_loss = 0
-    loss_diff = 0
+
+    max_time = 60 * 2
 
     # Loop until the zonotope is verified or a time out exception occurs
-    while True:
+    
+    while time.time() - start < max_time:
         num_relu = 0
         img_dim = INPUT_SIZE
 
@@ -126,15 +129,17 @@ This method verifies that the image is still correctly classified when perturbed
         loss.backward()
         optimizer.step()
 
-        # Adjusting optimizer's learning rate
-        print("Loss diff", (prev_loss - loss).item());
-        loss_diff = np.abs
-        prev_loss = loss;
+        # Adjusting optimizer's learning rate        
+        # if prev_loss > loss:
+        #     learning_rate = learning_rate / 0.9
+        # else:
+        #     learning_rate = learning_rate * 0.9
+        # prev_loss = loss
 
         adjust_learning_rate(optimizer, number_runs, 0.01, 0.5, 200)
 
         if DEBUG:
-            print(number_runs, "time", time.time() - start, "loss", loss.item(), "l[true_label]: ",
+            print(number_runs, "time", "{0:.2f}".format(time.time() - start), "{0:.5f}".format(learning_rate), "loss", loss.item(), "l[true_label]: ",
                 l[true_label].detach().numpy(), "max u: ", max.detach().numpy(), "params",
                 sum(p.numel() for p in slope_set if p.requires_grad))
 
@@ -186,6 +191,10 @@ Adjusts the learning rate of the optimizer if needed
     lr = init_lr * (decay_rate ** (epoch // decay_freq))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+
+# def get_training_parameters(network, model):
+
+
 
 
 def build_zonotope(inputs, eps):
@@ -365,7 +374,7 @@ def main():
     pred_label = outs.max(dim=1)[1].item()
     assert pred_label == true_label
 
-    if analyze(net, inputs, eps, true_label):
+    if analyze(net, inputs, eps, true_label, args.net):
         print('verified')
     else:
         print('not verified')
