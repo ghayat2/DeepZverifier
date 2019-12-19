@@ -8,11 +8,10 @@ import warnings
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
-DEBUG = False
+DEBUG = True
 
 
 def analyze(net, inputs, eps, true_label, model):
-    print(model)
     """
 This method verifies that the image is still correctly classified when perturbed by noise
     :param net: The network
@@ -31,7 +30,10 @@ This method verifies that the image is still correctly classified when perturbed
     total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
     # Check if layers must be frozen (Convolutional network must have all but last layer frozen while Dense network
     # should have none frozen)
-    threshold = -1 if (True in [isinstance(layer, torch.nn.Conv2d) for layer in layers]) else - total_num_relu
+    
+    # parameters we get for each case
+    learning_rate, threshold = get_training_parameters(model, layers, total_num_relu)
+
     freeze = -threshold is not total_num_relu
 
     if DEBUG:
@@ -50,7 +52,6 @@ This method verifies that the image is still correctly classified when perturbed
     start = time.time()
     parameters = list(net.parameters())
 
-    learning_rate = 0.1
     prev_loss = 0
 
     max_time = 60 * 2
@@ -115,7 +116,7 @@ This method verifies that the image is still correctly classified when perturbed
         diff[true_label] = 0
         poly = diff + 1
         
-        loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
+        # loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
 
         sorted_upper_bounds = u.sort(dim=0)
         max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
@@ -123,20 +124,18 @@ This method verifies that the image is still correctly classified when perturbed
         """Log loss """
         # loss = torch.log(max - l[true_label])
         """Linear loss """
-        # loss = max - l[true_label]
+        loss = max - l[true_label]
 
         # Computing gradients and modifying slopes
         loss.backward()
         optimizer.step()
 
         # Adjusting optimizer's learning rate        
-        # if prev_loss > loss:
-        #     learning_rate = learning_rate / 0.9
-        # else:
-        #     learning_rate = learning_rate * 0.9
-        # prev_loss = loss
-
-        adjust_learning_rate(optimizer, number_runs, 0.01, 0.5, 200)
+        if prev_loss > loss:
+            learning_rate = learning_rate / 0.9
+        else:
+            learning_rate = learning_rate * 0.9
+        prev_loss = loss
 
         if DEBUG:
             print(number_runs, "time", "{0:.2f}".format(time.time() - start), "{0:.5f}".format(learning_rate), "loss", loss.item(), "l[true_label]: ",
@@ -178,23 +177,36 @@ Creates the set of slopes of current ReLU layer. The slopes will be optimized de
 
     return slopes
 
-
-def adjust_learning_rate(optimizer, epoch, init_lr, decay_rate, decay_freq):
+def get_training_parameters(model, layers, total_num_relu):
     """
-Adjusts the learning rate of the optimizer if needed
-    :param optimizer: The optimizer
-    :param epoch: The current run
-    :param init_lr: The initial learning rate
-    :param decay_rate: The rate at which the learning rate should decay
-    :param decay_freq: The frequency at which the learning rate should decay
+This method calculates the parameters used for training
+    :param model: The string identifier for the model
+    :param layers: The layers of the network
+    :param total_num_relu: The number of relu layers in the network
+    :return: The learning rate and threshold for freezing layers
     """
-    lr = init_lr * (decay_rate ** (epoch // decay_freq))
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-# def get_training_parameters(network, model):
-
-
+    threshold = -1 if (True in [isinstance(layer, torch.nn.Conv2d) for layer in layers]) else - total_num_relu
+    if model == 'fc1':
+        learning_rate = 0.01
+    elif model == 'fc2':
+        learning_rate = 0.01
+    elif model == 'fc3':
+        learning_rate = 0.01
+    elif model == 'fc4':
+        learning_rate = 0.01
+    elif model == 'fc5':
+        learning_rate = 0.01
+    elif model == 'conv1':
+        learning_rate = 0.01
+    elif model == 'conv2':
+        learning_rate = 0.01
+    elif model == 'conv3':
+        learning_rate = 0.01
+    elif model == 'conv4':
+        learning_rate = 0.01
+    elif model == 'conv5':
+        learning_rate = 0.01
+    return learning_rate, threshold
 
 
 def build_zonotope(inputs, eps):
