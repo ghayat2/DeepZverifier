@@ -84,7 +84,7 @@ This method verifies that the image is still correctly classified when perturbed
                     img_dim = img_dim // layer.stride[0]
 
                 # Saving the zonotope before last ReLU layer to avoid re-computation
-                if number_runs is 0 and freeze and layer is not layers[-1]:
+                if number_runs is 0 and freeze and layer not in layers[threshold:]:
                     saved_zonotope = zonotope.detach()
                     if DEBUG:
                         print("Saved zonotope of size: ", zonotope.size())
@@ -128,9 +128,11 @@ This method verifies that the image is still correctly classified when perturbed
         # loss = max - l[true_label]
         """Cross entropy loss"""
         L = torch.nn.CrossEntropyLoss()
+        # L = torch.nn.NLLLoss()
+        m = torch.nn.LogSoftmax(dim=1)
         u[true_label] = l[true_label]
         softmax = torch.reshape(u, (1, 10))
-        loss = L(softmax, torch.full((1,), true_label).type(torch.LongTensor))
+        loss = L(m(softmax), torch.full((1,), true_label).type(torch.LongTensor))
 
         # Computing gradients and modifying slopes
         loss.backward()
@@ -158,9 +160,9 @@ This method verifies that the image is still correctly classified when perturbed
 
         # In the case of convolutional networks, only the slopes of the last ReLU layer will be optimized
         if number_runs is 0 and freeze:
-            layers = layers[-2:]
-            parameters = parameters[-2:]
-            slope_set = [slope_set[-1]]
+            layers = layers[2*threshold:]
+            parameters = parameters[2*threshold:]
+            slope_set = [slopes for slopes in slope_set[threshold:]]
 
         number_runs = number_runs + 1
 
