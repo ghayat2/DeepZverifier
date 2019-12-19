@@ -30,7 +30,7 @@ This method verifies that the image is still correctly classified when perturbed
     total_num_relu = sum([1 for layer in net.layers if isinstance(layer, torch.nn.ReLU)])
     # Check if layers must be frozen (Convolutional network must have all but last layer frozen while Dense network
     # should have none frozen)
-    
+
     # parameters we get for each case
     learning_rate, threshold = get_training_parameters(model, layers, total_num_relu)
 
@@ -57,7 +57,7 @@ This method verifies that the image is still correctly classified when perturbed
     max_time = 60 * 2
 
     # Loop until the zonotope is verified or a time out exception occurs
-    
+
     while time.time() - start < max_time:
         num_relu = 0
         img_dim = INPUT_SIZE
@@ -86,7 +86,8 @@ This method verifies that the image is still correctly classified when perturbed
                 # Saving the zonotope before last ReLU layer to avoid re-computation
                 if number_runs is 0 and freeze and layer is not layers[-1]:
                     saved_zonotope = zonotope.detach()
-                    print("Saved zonotope of size: ", zonotope.size())
+                    if DEBUG:
+                        print("Saved zonotope of size: ", zonotope.size())
 
             if isinstance(layer, torch.nn.ReLU):
 
@@ -115,8 +116,8 @@ This method verifies that the image is still correctly classified when perturbed
         diff = u - l[true_label]
         diff[true_label] = 0
         poly = diff + 1
-        
-        # loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
+
+        loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
 
         sorted_upper_bounds = u.sort(dim=0)
         max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
@@ -124,18 +125,19 @@ This method verifies that the image is still correctly classified when perturbed
         """Log loss """
         # loss = torch.log(max - l[true_label])
         """Linear loss """
-        loss = max - l[true_label]
+        # loss = max - l[true_label]
 
         # Computing gradients and modifying slopes
         loss.backward()
         optimizer.step()
 
-        # Adjusting optimizer's learning rate        
+        # Adjusting optimizer's learning rate
         if prev_loss > loss:
             learning_rate = learning_rate / 0.9
         else:
             learning_rate = learning_rate * 0.9
         prev_loss = loss
+
 
         if DEBUG:
             print(number_runs, "time", "{0:.2f}".format(time.time() - start), "{0:.5f}".format(learning_rate), "loss", loss.item(), "l[true_label]: ",
