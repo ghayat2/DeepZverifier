@@ -117,7 +117,7 @@ This method verifies that the image is still correctly classified when perturbed
         diff[true_label] = 0
         poly = diff + 1
 
-        loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
+        # loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
 
         sorted_upper_bounds = u.sort(dim=0)
         max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
@@ -126,6 +126,11 @@ This method verifies that the image is still correctly classified when perturbed
         # loss = torch.log(max - l[true_label])
         """Linear loss """
         # loss = max - l[true_label]
+        """Cross entropy loss"""
+        L = torch.nn.CrossEntropyLoss()
+        u[true_label] = l[true_label]
+        softmax = torch.reshape(u, (1, 10))
+        loss = L(softmax, torch.full((1,), true_label).type(torch.LongTensor))
 
         # Computing gradients and modifying slopes
         loss.backward()
@@ -138,11 +143,11 @@ This method verifies that the image is still correctly classified when perturbed
             learning_rate = learning_rate * 0.9
         prev_loss = loss
 
-
         if DEBUG:
-            print(number_runs, "time", "{0:.2f}".format(time.time() - start), "{0:.5f}".format(learning_rate), "loss", loss.item(), "l[true_label]: ",
-                l[true_label].detach().numpy(), "max u: ", max.detach().numpy(), "params",
-                sum(p.numel() for p in slope_set if p.requires_grad))
+            print(number_runs, "time", "{0:.2f}".format(time.time() - start), "{0:.5f}".format(learning_rate), "loss",
+                  loss.item(), "l[true_label]: ",
+                  l[true_label].detach().numpy(), "max u: ", max.detach().numpy(), "params",
+                  sum(p.numel() for p in slope_set if p.requires_grad))
 
         # Clipping to ensure soundness
         for s in range(len(slope_set)):
@@ -178,6 +183,7 @@ Creates the set of slopes of current ReLU layer. The slopes will be optimized de
         slopes = torch.tensor(u / (u - l), requires_grad=False)
 
     return slopes
+
 
 def get_training_parameters(model, layers, total_num_relu):
     """
