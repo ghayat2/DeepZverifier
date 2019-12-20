@@ -49,8 +49,6 @@ This method verifies that the image is still correctly classified when perturbed
     start = time.time()
     parameters = list(net.parameters())
 
-    prev_loss = 0
-
     max_time = 60 * 2
 
     # Loop until the zonotope is verified or a time out exception occurs
@@ -113,7 +111,6 @@ This method verifies that the image is still correctly classified when perturbed
         poly = diff + 1
 
         # loss = (torch.sum(torch.exp(diff) * (diff < 0) + poly * (diff >= 0)) - l[true_label]) ** 2
-
         sorted_upper_bounds = u.sort(dim=0)
         max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
 
@@ -132,13 +129,6 @@ This method verifies that the image is still correctly classified when perturbed
         # Computing gradients and modifying slopes
         loss.backward()
         optimizer.step()
-
-        # Adjusting optimizer's learning rate
-        if prev_loss > loss:
-            learning_rate = learning_rate / 0.9
-        else:
-            learning_rate = learning_rate * 0.9
-        prev_loss = loss
 
         if DEBUG:
             print(number_runs, "time", "{0:.2f}".format(time.time() - start), "{0:.5f}".format(learning_rate), "loss",
