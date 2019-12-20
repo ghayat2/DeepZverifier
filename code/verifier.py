@@ -8,7 +8,7 @@ import warnings
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
-DEBUG = True
+DEBUG = False
 
 
 def analyze(net, inputs, eps, true_label, model):
@@ -35,9 +35,6 @@ This method verifies that the image is still correctly classified when perturbed
     learning_rate, threshold = get_training_parameters(model, layers, total_num_relu)
 
     freeze = -threshold is not total_num_relu
-
-    if DEBUG:
-        print("Optimizing for", -threshold, " ReLU layers")
 
     # Building the zonotope
     inputs = inputs.reshape(-1)
@@ -86,8 +83,6 @@ This method verifies that the image is still correctly classified when perturbed
                 # Saving the zonotope before last ReLU layer to avoid re-computation
                 if number_runs is 0 and freeze and layer not in layers[threshold:]:
                     saved_zonotope = zonotope.detach()
-                    if DEBUG:
-                        print("Saved zonotope of size: ", zonotope.size())
 
             if isinstance(layer, torch.nn.ReLU):
 
@@ -245,7 +240,7 @@ Builds the zonotope
 
 def affine_dense(zonotope, weight_matrix, bias):
     """
- Pushes the zonotope through the dense layer associated with the weight matrix and bias arguments
+Pushes the zonotope through the dense layer associated with the weight matrix and bias arguments
     :param zonotope: The zonotope to be pushed
     :param weight_matrix: Weights of the layer
     :param bias: Bias of the layer
