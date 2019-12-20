@@ -53,7 +53,7 @@ This method verifies that the image is still correctly classified when perturbed
 
     # Loop until the zonotope is verified or a time out exception occurs
 
-    while time.time() - start < max_time:
+    while True:
         num_relu = 0
         img_dim = INPUT_SIZE
 
