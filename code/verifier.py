@@ -35,6 +35,7 @@ This method verifies that the image is still correctly classified when perturbed
     learning_rate, threshold = get_training_parameters(model, layers, total_num_relu)
 
     freeze = -threshold is not total_num_relu
+    opt_zonotope_bounds = None
 
     # Building the zonotope
     inputs = inputs.reshape(-1)
@@ -42,9 +43,9 @@ This method verifies that the image is still correctly classified when perturbed
 
     # In the case of convolutional networks, the zonotope before the last ReLU layer will be saved to avoid
     # re-computation at every run
-    saved_zonotope = initial_zonotope
+    saved_zonotope = [initial_zonotope, initial_zonotope, initial_zonotope]
 
-    slope_set = []
+    slope_set = [[], [], []]
     number_runs = 0
     start = time.time()
     parameters = list(net.parameters())
@@ -79,29 +80,39 @@ This method verifies that the image is still correctly classified when perturbed
                     img_dim = img_dim // layer.stride[0]
 
                 # Saving the zonotope before last ReLU layer to avoid re-computation
-                if number_runs is 0 and freeze and layer not in layers[threshold:]:
-                    saved_zonotope = zonotope.detach()
+                if number_runs in [0, 1, 2] and freeze and layer not in layers[threshold:]:
+                    saved_zonotope[number_runs] = zonotope.detach()
 
             if isinstance(layer, torch.nn.ReLU):
 
-                if number_runs is not 0 and freeze:
-                    zonotope = saved_zonotope
+                if not number_runs in [0, 1, 2] and freeze:
+                    zonotope = saved_zonotope[number_runs % 3]
 
                 (l, u) = compute_upper_lower_bounds(zonotope)
                 if number_runs is 0:
                     u, l = u.detach(), l.detach()
-                    slopes = freeze_all_but_last(threshold, num_relu, total_num_relu, l, u)
-                    slope_set.append(slopes)
+                    slopes = freeze_all_but_last(threshold, num_relu, total_num_relu, l, u, 0)
+                    slope_set[0].append(slopes)
+                if number_runs is 1:
+                    u, l = u.detach(), l.detach()
+                    slopes = freeze_all_but_last(threshold, num_relu, total_num_relu, l, u, 1)
+                    slope_set[1].append(slopes)
+                if number_runs is 2:
+                    u, l = u.detach(), l.detach()
+                    slopes = freeze_all_but_last(threshold, num_relu, total_num_relu, l, u, 2)
+                    slope_set[2].append(slopes)
 
-                zonotope = relu(zonotope, l, u, slopes=slope_set[num_relu])
+                zonotope = relu(zonotope, l, u, slopes=slope_set[number_runs % 3][num_relu])
                 num_relu = num_relu + 1
 
         # Verifying stopping condition
-        if verify(zonotope, true_label):
+        result, opt_zonotope_bounds = verify(zonotope, true_label, opt_zonotope_bounds)
+
+        if result:
             return 1
 
         # Define the optimizer and slopes to train
-        optimizer = optim.Adam(slope_set, lr=learning_rate)
+        optimizer = optim.Adam(slope_set[number_runs % 3], lr=learning_rate)
 
         (l, u) = compute_upper_lower_bounds(zonotope)
         # Calculate loss
@@ -134,27 +145,27 @@ This method verifies that the image is still correctly classified when perturbed
             print(number_runs, "time", "{0:.2f}".format(time.time() - start), "{0:.5f}".format(learning_rate), "loss",
                   loss.item(), "l[true_label]: ",
                   l[true_label].detach().numpy(), "max u: ", max.detach().numpy(), "params",
-                  sum(p.numel() for p in slope_set if p.requires_grad))
+                  sum(p.numel() for p in slope_set[number_runs % 3] if p.requires_grad))
 
         # Clipping to ensure soundness
-        for s in range(len(slope_set)):
-            slope_set[s].data = torch.clamp(slope_set[s].data, min=0, max=1)
+        for s in range(len(slope_set[number_runs % 3])):
+            slope_set[number_runs % 3][s].data = torch.clamp(slope_set[number_runs % 3][s].data, min=0, max=1)
 
         # Clear gradients
         optimizer.zero_grad()
 
         # In the case of convolutional networks, only the slopes of the last ReLU layer will be optimized
-        if number_runs is 0 and freeze:
+        if number_runs in [0, 1, 2] and freeze:
             layers = layers[2*threshold:]
             parameters = parameters[2*threshold:]
-            slope_set = [slopes for slopes in slope_set[threshold:]]
+            slope_set[number_runs % 3] = [slopes for slopes in slope_set[number_runs % 3][threshold:]]
 
         number_runs = number_runs + 1
 
     return 0
 
 
-def freeze_all_but_last(threshold, num_relu, total_num_relu, l, u):
+def freeze_all_but_last(threshold, num_relu, total_num_relu, l, u, mod):
     """
 Creates the set of slopes of current ReLU layer. The slopes will be optimized depending on the current ReLU layer
     :param threshold: -1 if all but last ReLU layer must be frozen, total_num_relu else
@@ -165,9 +176,16 @@ Creates the set of slopes of current ReLU layer. The slopes will be optimized de
     :return: the set of slopes associated with the current ReLU layer
     """
     if num_relu - total_num_relu >= threshold:
-        slopes = torch.tensor(u / (u - l), requires_grad=True)
+        grad_enabled = True
     else:
-        slopes = torch.tensor(u / (u - l), requires_grad=False)
+        grad_enabled = False
+
+    if mod is 0:
+        slopes = torch.zeros_like(u, requires_grad=grad_enabled)
+    elif mod is 1:
+        slopes = torch.tensor(u / (u - l), requires_grad=grad_enabled)
+    else:
+        slopes = torch.ones_like(u, requires_grad=grad_enabled)
 
     return slopes
 
@@ -190,7 +208,7 @@ This method calculates the parameters used for training
     elif model == 'fc4':
         learning_rate = 0.01
     elif model == 'fc5':
-        learning_rate = 0.01
+        learning_rate = 0.1
     elif model == 'conv1':
         learning_rate = 0.01
     elif model == 'conv2':
@@ -321,7 +339,7 @@ Computes the lower and upper bounds of the zonotope
     return l, u
 
 
-def verify(zonotope, true_label):
+def verify(zonotope, true_label, opt_zonotope_bounds):
     """
 Checks if the zonotope is verified w.r.t the true label
     :param zonotope: The zonotope
@@ -329,11 +347,20 @@ Checks if the zonotope is verified w.r.t the true label
     :return: 1 if the zonotope is verified, 0 else
     """
     l, u = compute_upper_lower_bounds(zonotope)
-    threshold = l[true_label]
-    sorted_upper_bounds = u.sort(dim=0)
-    max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u[true_label] else sorted_upper_bounds[0][-2]
 
-    return int(max <= threshold)
+    if opt_zonotope_bounds is None:
+        l_opt = l
+        u_opt = u
+    else:
+        [l_opt, u_opt] = opt_zonotope_bounds
+        l_opt = torch.max(l_opt, l)
+        u_opt = torch.min(u_opt, u)
+
+    threshold = l_opt[true_label]
+    sorted_upper_bounds = u_opt.sort(dim=0)
+    max = sorted_upper_bounds[0][-1] if sorted_upper_bounds[0][-1] != u_opt[true_label] else sorted_upper_bounds[0][-2]
+    print(max, threshold)
+    return int(max <= threshold), [l_opt, u_opt]
 
 
 def main():
