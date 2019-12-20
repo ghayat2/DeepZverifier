@@ -129,10 +129,10 @@ This method verifies that the image is still correctly classified when perturbed
         """Cross entropy loss"""
         L = torch.nn.CrossEntropyLoss()
         # L = torch.nn.NLLLoss()
-        m = torch.nn.LogSoftmax(dim=1)
+        # m = torch.nn.LogSoftmax(dim=1)
         u[true_label] = l[true_label]
         softmax = torch.reshape(u, (1, 10))
-        loss = L(m(softmax), torch.full((1,), true_label).type(torch.LongTensor))
+        loss = L(softmax, torch.full((1,), true_label).type(torch.LongTensor))
 
         # Computing gradients and modifying slopes
         loss.backward()
