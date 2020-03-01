@@ -51,3 +51,5 @@ You can run this script using the following commands:
 chmod +x evaluate
 ./evaluate
 ```
+
+For more information about the implementation of the verifier, please see the report.pdf file.
